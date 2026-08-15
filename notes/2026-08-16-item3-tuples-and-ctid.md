@@ -6,7 +6,12 @@
 
 ---
 
-## 1. Directory Structure
+## 1. Directory Structure & Attached Code Files
+
+- **Tuple Header & CTID**: [`include/pg/tuple.h`](../include/pg/tuple.h)
+- **HeapFile Manager Header**: [`include/pg/heap.h`](../include/pg/heap.h)
+- **HeapFile Implementation**: [`src/heap.cpp`](../src/heap.cpp)
+- **Unit Test Suite**: [`tests/test_heap.cpp`](../tests/test_heap.cpp)
 
 ```text
 cpp-postgres/

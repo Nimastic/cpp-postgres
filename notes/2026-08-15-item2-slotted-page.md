@@ -141,9 +141,13 @@ Why not store physical byte offsets directly in indexes (e.g. `(Page 0, Byte 813
 
 ---
 
-## 4. File-by-File Technical Breakdown
+## 4. File-by-File Technical Breakdown & Attached Code Files
 
-### A. `include/pg/page.h`
+- **Page Interface Header**: [`include/pg/page.h`](../include/pg/page.h)
+- **Page Implementation**: [`src/page.cpp`](../src/page.cpp)
+- **Unit Test Suite**: [`tests/test_page.cpp`](../tests/test_page.cpp)
+
+### A. [`include/pg/page.h`](../include/pg/page.h)
 
 ```cpp
 #pragma once
