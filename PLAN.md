@@ -8,7 +8,7 @@ Not the whole database. Just the parts from that video, plus a few things you bu
 
 One item at a time. When an item works, stop. Do not start the B-tree, the WAL, or a SQL parser early — they do not mean anything until the heap can hand you a CTID and an update can leave two versions of the same row sitting on a page.
 
-Where I am: Item 4 complete (MVCC with TransactionManager, Snapshots, is_tuple_visible logic, non-in-place updates, verified video $10 vs $20 snapshot scenario, rollback/isolation tests). Next is Item 5 (Vacuum).
+Where I am: Item 5 complete (Vacuum engine, dead tuple detection with oldest_active_xmin horizon, in-place page defragmentation, slot reuse, and test suite). Next is Item 6 (B-Tree Index).
 
 A few constants I am sticking to:
 

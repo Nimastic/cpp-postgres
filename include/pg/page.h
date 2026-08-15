@@ -78,6 +78,10 @@ public:
     const uint8_t* get_tuple_ptr(slot_id_t slot_id, size_t* out_len = nullptr) const;
     std::optional<std::vector<uint8_t>> get_tuple(slot_id_t slot_id) const;
 
+    // Defragment page: shifts all surviving live (NORMAL) tuples towards page end,
+    // compacts dead space, updates line pointer offsets, and expands pd_upper.
+    void defragment();
+
     // Direct access to underlying 8KB buffer
     const uint8_t* data() const { return data_; }
     uint8_t* data() { return data_; }

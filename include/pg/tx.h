@@ -47,6 +47,9 @@ public:
     // Query status of a transaction
     TransactionStatus get_status(tx_id_t tx_id) const;
 
+    // Returns the lowest xmin among all currently active snapshots (or next_tx_id if none active)
+    tx_id_t oldest_active_xmin() const;
+
     // Get current global transaction ID counter
     tx_id_t next_tx_id() const { return next_tx_id_; }
 

@@ -66,6 +66,27 @@ slot_id_t Page::insert_tuple(const void* data, size_t len) {
     }
 
     auto& hdr = header();
+    auto* lp_array = line_pointers_internal();
+    size_t slots = num_slots();
+
+    // Check if we can reuse an existing DEAD or UNUSED line pointer
+    for (size_t i = 0; i < slots; ++i) {
+        if (lp_array[i].flags() == ItemFlags::DEAD || lp_array[i].flags() == ItemFlags::UNUSED) {
+            // Dead slot already exists; only need space for tuple payload
+            if (hdr.pd_upper < hdr.pd_lower || (hdr.pd_upper - hdr.pd_lower) < len) {
+                return INVALID_SLOT_ID; // Not enough free space
+            }
+
+            uint16_t new_upper = static_cast<uint16_t>(hdr.pd_upper - len);
+            std::memcpy(data_ + new_upper, data, len);
+
+            lp_array[i].set(new_upper, static_cast<uint16_t>(len), ItemFlags::NORMAL);
+            hdr.pd_upper = new_upper;
+            return static_cast<slot_id_t>(i + 1);
+        }
+    }
+
+    // No reusable slot found; append new slot at pd_lower
     size_t space_needed = len + sizeof(LinePointer);
     if (hdr.pd_upper < hdr.pd_lower || (hdr.pd_upper - hdr.pd_lower) < space_needed) {
         return INVALID_SLOT_ID; // Not enough free space on this page
@@ -79,7 +100,6 @@ slot_id_t Page::insert_tuple(const void* data, size_t len) {
     LinePointer lp;
     lp.set(new_upper, static_cast<uint16_t>(len), ItemFlags::NORMAL);
 
-    auto* lp_array = line_pointers_internal();
     size_t slot_index = (hdr.pd_lower - sizeof(PageHeaderData)) / sizeof(LinePointer);
     lp_array[slot_index] = lp;
 
@@ -88,6 +108,44 @@ slot_id_t Page::insert_tuple(const void* data, size_t len) {
 
     // Return 1-based slot ID (slot 1, 2, ...)
     return static_cast<slot_id_t>(slot_index + 1);
+}
+
+void Page::defragment() {
+    auto& hdr = header();
+    size_t slots = num_slots();
+    if (slots == 0) {
+        hdr.pd_upper = static_cast<uint16_t>(PAGE_SIZE);
+        return;
+    }
+
+    // Temporary copy of page memory to read uncompacted tuples
+    uint8_t temp_page[PAGE_SIZE];
+    std::memcpy(temp_page, data_, PAGE_SIZE);
+
+    uint16_t current_upper = static_cast<uint16_t>(PAGE_SIZE);
+    auto* lp_array = line_pointers_internal();
+
+    for (size_t i = 0; i < slots; ++i) {
+        auto& lp = lp_array[i];
+        if (lp.flags() == ItemFlags::NORMAL) {
+            uint16_t len = lp.length();
+            uint16_t old_offset = lp.lp_offset;
+            uint16_t new_offset = current_upper - len;
+
+            // Copy tuple payload into compacted position
+            std::memcpy(data_ + new_offset, temp_page + old_offset, len);
+
+            // Update line pointer with new offset
+            lp.set(new_offset, len, ItemFlags::NORMAL);
+            current_upper = new_offset;
+        } else if (lp.flags() == ItemFlags::DEAD) {
+            // Dead tuple has no physical bytes allocated in compacted area
+            lp.set(0, 0, ItemFlags::DEAD);
+        }
+    }
+
+    // Expand pd_upper to the new start of the youngest live tuple
+    hdr.pd_upper = current_upper;
 }
 
 std::optional<LinePointer> Page::get_line_pointer(slot_id_t slot_id) const {

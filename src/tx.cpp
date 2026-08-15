@@ -46,6 +46,17 @@ void TransactionManager::abort(tx_id_t tx_id) {
     active_txs_.erase(tx_id);
 }
 
+tx_id_t TransactionManager::oldest_active_xmin() const {
+    if (active_txs_.empty()) {
+        return next_tx_id_;
+    }
+    tx_id_t min_id = next_tx_id_;
+    for (tx_id_t id : active_txs_) {
+        min_id = std::min(min_id, id);
+    }
+    return min_id;
+}
+
 TransactionStatus TransactionManager::get_status(tx_id_t tx_id) const {
     if (tx_id == 0) {
         return TransactionStatus::COMMITTED;
