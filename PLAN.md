@@ -8,7 +8,7 @@ Not the whole database. Just the parts from that video, plus a few things you bu
 
 One item at a time. When an item works, stop. Do not start the B-tree, the WAL, or a SQL parser early — they do not mean anything until the heap can hand you a CTID and an update can leave two versions of the same row sitting on a page.
 
-Where I am: Item 2 complete (Slotted page structure with PageHeaderData, ItemIdData/LinePointer, pd_lower/pd_upper free space math, tuple packing, and test suite). Next is Item 3.
+Where I am: Item 3 complete (Tuples, TupleHeader with xmin/xmax/t_ctid, CTID physical address, HeapFile manager with automatic multi-page allocation, seq_scan, and test suite). Next is Item 4 (MVCC).
 
 A few constants I am sticking to:
 

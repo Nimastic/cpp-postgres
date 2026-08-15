@@ -11,6 +11,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_library(pg_core
     src/pager.cpp
     src/page.cpp
+    src/heap.cpp
 )
 
 # Item 1 test executable
@@ -20,4 +21,9 @@ target_link_libraries(test_pager PRIVATE pg_core)
 # Item 2 test executable
 add_executable(test_page tests/test_page.cpp)
 target_link_libraries(test_page PRIVATE pg_core)
+
+# Item 3 test executable
+add_executable(test_heap tests/test_heap.cpp)
+target_link_libraries(test_heap PRIVATE pg_core)
+
 
