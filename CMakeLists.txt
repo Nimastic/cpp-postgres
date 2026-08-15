@@ -12,6 +12,8 @@ add_library(pg_core
     src/pager.cpp
     src/page.cpp
     src/heap.cpp
+    src/tx.cpp
+    src/mvcc.cpp
 )
 
 # Item 1 test executable
@@ -25,5 +27,10 @@ target_link_libraries(test_page PRIVATE pg_core)
 # Item 3 test executable
 add_executable(test_heap tests/test_heap.cpp)
 target_link_libraries(test_heap PRIVATE pg_core)
+
+# Item 4 test executable
+add_executable(test_mvcc tests/test_mvcc.cpp)
+target_link_libraries(test_mvcc PRIVATE pg_core)
+
 
 

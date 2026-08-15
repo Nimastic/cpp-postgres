@@ -59,6 +59,39 @@ CTID HeapFile::insert(const ItemRecord& record, tx_id_t xmin) {
     return assigned_ctid;
 }
 
+CTID HeapFile::update(const CTID& old_ctid, const ItemRecord& new_record, tx_id_t tx_id) {
+    auto old_tuple_opt = get(old_ctid);
+    if (!old_tuple_opt.has_value()) {
+        throw std::runtime_error("HeapFile::update: Target tuple not found at CTID " + old_ctid.to_string());
+    }
+
+    // Non-in-place update:
+    // 1. Insert new tuple version with xmin = tx_id
+    CTID new_ctid = insert(new_record, tx_id);
+
+    // 2. Mark old tuple version with xmax = tx_id and point t_ctid to new_ctid
+    TupleHeader updated_header = old_tuple_opt->header;
+    updated_header.xmax = tx_id;
+    updated_header.t_ctid = new_ctid;
+
+    if (!update_tuple_header(old_ctid, updated_header)) {
+        throw std::runtime_error("HeapFile::update: Failed to stamp xmax on old tuple at " + old_ctid.to_string());
+    }
+
+    return new_ctid;
+}
+
+bool HeapFile::delete_tuple(const CTID& target_ctid, tx_id_t tx_id) {
+    auto tuple_opt = get(target_ctid);
+    if (!tuple_opt.has_value()) {
+        return false;
+    }
+
+    TupleHeader updated_header = tuple_opt->header;
+    updated_header.xmax = tx_id;
+    return update_tuple_header(target_ctid, updated_header);
+}
+
 std::optional<HeapTuple> HeapFile::get(const CTID& ctid) {
     if (!ctid.is_valid() || ctid.page >= pager_->num_pages()) {
         return std::nullopt;
@@ -122,6 +155,19 @@ std::vector<std::pair<CTID, HeapTuple>> HeapFile::seq_scan() {
     }
 
     return results;
+}
+
+std::vector<std::pair<CTID, HeapTuple>> HeapFile::seq_scan(const Snapshot& snapshot, const TransactionManager& tm) {
+    std::vector<std::pair<CTID, HeapTuple>> visible_tuples;
+    auto all_tuples = seq_scan();
+
+    for (const auto& [ctid, tuple] : all_tuples) {
+        if (is_tuple_visible(tuple.header, snapshot, tm)) {
+            visible_tuples.emplace_back(ctid, tuple);
+        }
+    }
+
+    return visible_tuples;
 }
 
 } // namespace pg
