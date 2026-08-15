@@ -10,8 +10,14 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 # Core Postgres engine library
 add_library(pg_core
     src/pager.cpp
+    src/page.cpp
 )
 
 # Item 1 test executable
 add_executable(test_pager tests/test_pager.cpp)
 target_link_libraries(test_pager PRIVATE pg_core)
+
+# Item 2 test executable
+add_executable(test_page tests/test_page.cpp)
+target_link_libraries(test_page PRIVATE pg_core)
+

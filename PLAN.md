@@ -8,7 +8,7 @@ Not the whole database. Just the parts from that video, plus a few things you bu
 
 One item at a time. When an item works, stop. Do not start the B-tree, the WAL, or a SQL parser early — they do not mean anything until the heap can hand you a CTID and an update can leave two versions of the same row sitting on a page.
 
-Where I am: Item 1 complete (Pager with 8KB page allocations, raw read/write, file size verification, and test suite). Next is Item 2.
+Where I am: Item 2 complete (Slotted page structure with PageHeaderData, ItemIdData/LinePointer, pd_lower/pd_upper free space math, tuple packing, and test suite). Next is Item 3.
 
 A few constants I am sticking to:
 

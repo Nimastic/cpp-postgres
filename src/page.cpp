@@ -1,0 +1,177 @@
+#include "pg/page.h"
+#include <cstring>
+#include <iomanip>
+#include <sstream>
+
+namespace pg {
+
+Page::Page() {
+    init();
+}
+
+Page::Page(const void* raw_data) {
+    if (raw_data != nullptr) {
+        std::memcpy(data_, raw_data, PAGE_SIZE);
+    } else {
+        init();
+    }
+}
+
+void Page::init() {
+    std::memset(data_, 0, PAGE_SIZE);
+    auto* hdr = reinterpret_cast<PageHeaderData*>(data_);
+    hdr->pd_lsn = 0;
+    hdr->pd_checksum = 0;
+    hdr->pd_flags = 0;
+    hdr->pd_lower = static_cast<uint16_t>(sizeof(PageHeaderData));
+    hdr->pd_upper = static_cast<uint16_t>(PAGE_SIZE);
+    hdr->pd_special = static_cast<uint16_t>(PAGE_SIZE);
+}
+
+const PageHeaderData& Page::header() const {
+    return *reinterpret_cast<const PageHeaderData*>(data_);
+}
+
+PageHeaderData& Page::header() {
+    return *reinterpret_cast<PageHeaderData*>(data_);
+}
+
+LinePointer* Page::line_pointers_internal() {
+    return reinterpret_cast<LinePointer*>(data_ + sizeof(PageHeaderData));
+}
+
+const LinePointer* Page::line_pointers_internal() const {
+    return reinterpret_cast<const LinePointer*>(data_ + sizeof(PageHeaderData));
+}
+
+size_t Page::num_slots() const {
+    const auto& hdr = header();
+    if (hdr.pd_lower < sizeof(PageHeaderData)) {
+        return 0;
+    }
+    return (hdr.pd_lower - sizeof(PageHeaderData)) / sizeof(LinePointer);
+}
+
+size_t Page::free_space() const {
+    const auto& hdr = header();
+    if (hdr.pd_upper <= hdr.pd_lower + sizeof(LinePointer)) {
+        return 0;
+    }
+    return (hdr.pd_upper - hdr.pd_lower - sizeof(LinePointer));
+}
+
+slot_id_t Page::insert_tuple(const void* data, size_t len) {
+    if (data == nullptr || len == 0 || len > PAGE_SIZE) {
+        return INVALID_SLOT_ID;
+    }
+
+    auto& hdr = header();
+    size_t space_needed = len + sizeof(LinePointer);
+    if (hdr.pd_upper < hdr.pd_lower || (hdr.pd_upper - hdr.pd_lower) < space_needed) {
+        return INVALID_SLOT_ID; // Not enough free space on this page
+    }
+
+    // Tuples grow downward from the top of the page towards pd_upper
+    uint16_t new_upper = static_cast<uint16_t>(hdr.pd_upper - len);
+    std::memcpy(data_ + new_upper, data, len);
+
+    // Line pointers grow upward from pd_lower
+    LinePointer lp;
+    lp.set(new_upper, static_cast<uint16_t>(len), ItemFlags::NORMAL);
+
+    auto* lp_array = line_pointers_internal();
+    size_t slot_index = (hdr.pd_lower - sizeof(PageHeaderData)) / sizeof(LinePointer);
+    lp_array[slot_index] = lp;
+
+    hdr.pd_upper = new_upper;
+    hdr.pd_lower += static_cast<uint16_t>(sizeof(LinePointer));
+
+    // Return 1-based slot ID (slot 1, 2, ...)
+    return static_cast<slot_id_t>(slot_index + 1);
+}
+
+std::optional<LinePointer> Page::get_line_pointer(slot_id_t slot_id) const {
+    if (slot_id == INVALID_SLOT_ID || slot_id > num_slots()) {
+        return std::nullopt;
+    }
+    return line_pointers_internal()[slot_id - 1];
+}
+
+bool Page::set_line_pointer(slot_id_t slot_id, const LinePointer& lp) {
+    if (slot_id == INVALID_SLOT_ID || slot_id > num_slots()) {
+        return false;
+    }
+    line_pointers_internal()[slot_id - 1] = lp;
+    return true;
+}
+
+const uint8_t* Page::get_tuple_ptr(slot_id_t slot_id, size_t* out_len) const {
+    auto lp_opt = get_line_pointer(slot_id);
+    if (!lp_opt.has_value()) {
+        return nullptr;
+    }
+
+    const auto& lp = lp_opt.value();
+    if (lp.flags() != ItemFlags::NORMAL) {
+        return nullptr;
+    }
+
+    if (out_len != nullptr) {
+        *out_len = lp.length();
+    }
+    return data_ + lp.lp_offset;
+}
+
+std::optional<std::vector<uint8_t>> Page::get_tuple(slot_id_t slot_id) const {
+    size_t len = 0;
+    const uint8_t* ptr = get_tuple_ptr(slot_id, &len);
+    if (ptr == nullptr) {
+        return std::nullopt;
+    }
+    return std::vector<uint8_t>(ptr, ptr + len);
+}
+
+std::string Page::dump() const {
+    std::ostringstream ss;
+    const auto& hdr = header();
+    size_t slots = num_slots();
+
+    ss << "====================== PAGE LAYOUT DUMP ======================\n";
+    ss << "Header Size   : " << sizeof(PageHeaderData) << " bytes\n";
+    ss << "pd_lower      : " << hdr.pd_lower << " (end of line pointers)\n";
+    ss << "pd_upper      : " << hdr.pd_upper << " (start of youngest tuple)\n";
+    ss << "Free Space    : " << (hdr.pd_upper > hdr.pd_lower ? hdr.pd_upper - hdr.pd_lower : 0) << " bytes\n";
+    ss << "Slot Count    : " << slots << " items\n";
+    ss << "--------------------------------------------------------------\n";
+    ss << " [0.." << sizeof(PageHeaderData) - 1 << "] PageHeaderData (" << sizeof(PageHeaderData) << "B)\n";
+
+    if (slots > 0) {
+        ss << " [Line Pointers -> growing forward from offset " << sizeof(PageHeaderData) << " to " << hdr.pd_lower << "]\n";
+        const auto* lp_array = line_pointers_internal();
+        for (size_t i = 0; i < slots; ++i) {
+            const auto& lp = lp_array[i];
+            const char* flag_str = "UNUSED";
+            switch (lp.flags()) {
+                case ItemFlags::NORMAL:   flag_str = "NORMAL"; break;
+                case ItemFlags::REDIRECT: flag_str = "REDIRECT"; break;
+                case ItemFlags::DEAD:     flag_str = "DEAD"; break;
+                default:                  flag_str = "UNKNOWN"; break;
+            }
+            ss << "   Slot " << std::setw(2) << (i + 1)
+               << ": offset=" << std::setw(4) << lp.lp_offset
+               << ", len=" << std::setw(4) << lp.length()
+               << ", flags=" << flag_str << "\n";
+        }
+    }
+
+    ss << " [" << hdr.pd_lower << ".." << hdr.pd_upper << "] Free Space Gap (" 
+       << (hdr.pd_upper > hdr.pd_lower ? hdr.pd_upper - hdr.pd_lower : 0) << " bytes)\n";
+
+    if (hdr.pd_upper < PAGE_SIZE) {
+        ss << " [" << hdr.pd_upper << ".." << (PAGE_SIZE - 1) << "] Tuple Storage Area (<- growing backward)\n";
+    }
+    ss << "==============================================================\n";
+    return ss.str();
+}
+
+} // namespace pg
