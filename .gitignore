@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+bin/
+out/
+*.exe
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.pdb
+
+# Database files & test artifacts
+*.db
+*.db-journal
+*.bin
+
+# IDE & Editor files
+.vscode/
+.vs/
+.idea/
+*.user
+
+# Submodule / tool directories to ignore per request
+learn-with-ai/
