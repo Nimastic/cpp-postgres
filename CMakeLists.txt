@@ -18,6 +18,7 @@ add_library(pg_core
     src/btree.cpp
     src/buffer_pool.cpp
     src/wal.cpp
+    src/toast.cpp
 )
 
 # Item 1 test executable
@@ -55,6 +56,11 @@ target_link_libraries(test_buffer_pool PRIVATE pg_core)
 # Item 9 test executable
 add_executable(test_wal tests/test_wal.cpp)
 target_link_libraries(test_wal PRIVATE pg_core)
+
+# Item 10 test executable
+add_executable(test_toast tests/test_toast.cpp)
+target_link_libraries(test_toast PRIVATE pg_core)
+
 
 
 
