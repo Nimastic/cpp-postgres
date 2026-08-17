@@ -8,7 +8,7 @@ Not the whole database. Just the parts from that video, plus a few things you bu
 
 One item at a time. When an item works, stop. Do not start the B-tree, the WAL, or a SQL parser early — they do not mean anything until the heap can hand you a CTID and an update can leave two versions of the same row sitting on a page.
 
-Where I am: Item 8 complete (Shared Buffers / BufferPoolManager, fixed-size memory frames, Clock-Sweep eviction, Pin/Unpin lifecycle, dirty page writeback, and test suite). Next is Item 9 (WAL / Write-Ahead Logging).
+Where I am: Item 9 complete (WAL logging, 35B WALRecordHeader, CRC32 verification, flush-on-commit, REDO crash recovery replay, and test suite). Next is Item 10 (TOAST / Oversized Attribute Storage).
 
 A few constants I am sticking to:
 

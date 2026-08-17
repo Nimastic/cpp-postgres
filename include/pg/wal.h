@@ -1,0 +1,95 @@
+#pragma once
+
+#include "pg/constants.h"
+#include "pg/tuple.h"
+#include "pg/tx.h"
+#include <cstdint>
+#include <vector>
+#include <string>
+#include <fstream>
+#include <memory>
+#include <optional>
+
+namespace pg {
+
+class HeapFile;
+
+using lsn_t = uint64_t;
+constexpr lsn_t INVALID_LSN = 0;
+
+enum class WALRecordType : uint8_t {
+    INVALID = 0,
+    INSERT = 1,
+    UPDATE = 2,
+    COMMIT = 3,
+    ABORT = 4
+};
+
+#pragma pack(push, 1)
+// 30-byte binary header for each WAL record in wal.log
+struct WALRecordHeader {
+    lsn_t         lsn{0};            // Byte offset of this record in WAL file
+    lsn_t         prev_lsn{0};       // Byte offset of previous record
+    tx_id_t       tx_id{0};          // Transaction that produced this log
+    WALRecordType type{WALRecordType::INVALID}; // Record type (INSERT, UPDATE, COMMIT, ABORT)
+    page_id_t     page_id{INVALID_PAGE_ID};     // Affected heap page ID
+    slot_id_t     slot_id{INVALID_SLOT_ID};     // Affected slot ID
+    uint32_t      payload_len{0};    // Byte length of following payload
+    uint32_t      crc{0};            // CRC32 checksum for corruption detection
+};
+#pragma pack(pop)
+
+static_assert(sizeof(WALRecordHeader) == 35, "WALRecordHeader must be exactly 35 bytes");
+
+// Complete in-memory WAL record
+struct WALRecord {
+    WALRecordHeader header;
+    std::vector<uint8_t> payload;
+
+    uint32_t calculate_crc() const;
+    bool verify_crc() const;
+};
+
+// PostgreSQL Write-Ahead Logging Manager
+// Enforces:
+// 1. Fast sequential binary log append (wal.log)
+// 2. Monotonically advancing Log Sequence Numbers (LSN)
+// 3. Write-Ahead Rule (wal.flushed_lsn >= page.pd_lsn)
+// 4. Redo crash recovery replay after system failure
+class WALManager {
+public:
+    explicit WALManager(const std::string& wal_path);
+    ~WALManager();
+
+    // Factory method
+    static std::unique_ptr<WALManager> open(const std::string& wal_path);
+
+    // Logging operations
+    lsn_t log_insert(tx_id_t tx_id, page_id_t page_id, slot_id_t slot_id, const HeapTuple& tuple);
+    lsn_t log_update(tx_id_t tx_id, const CTID& old_ctid, const CTID& new_ctid, const HeapTuple& new_tuple);
+    lsn_t log_commit(tx_id_t tx_id);
+    lsn_t log_abort(tx_id_t tx_id);
+
+    // Flush WAL records up to target_lsn (fsync / stream flush)
+    void flush(lsn_t target_lsn);
+    void flush();
+
+    // LSN inspection
+    lsn_t current_lsn() const { return current_lsn_; }
+    lsn_t flushed_lsn() const { return flushed_lsn_; }
+
+    // Crash Recovery: Scans WAL from byte 0, verifies CRCs, and replays all committed
+    // operations onto the heap file, restoring page LSNs and transaction states
+    size_t recover(HeapFile& heap, TransactionManager& tm);
+
+private:
+    std::string wal_path_;
+    std::fstream stream_;
+    lsn_t current_lsn_{0};
+    lsn_t flushed_lsn_{0};
+    lsn_t prev_lsn_{0};
+
+    lsn_t append_record(WALRecordType type, tx_id_t tx_id, page_id_t page_id, slot_id_t slot_id, const void* data, size_t len);
+};
+
+} // namespace pg

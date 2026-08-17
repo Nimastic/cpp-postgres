@@ -17,6 +17,7 @@ add_library(pg_core
     src/vacuum.cpp
     src/btree.cpp
     src/buffer_pool.cpp
+    src/wal.cpp
 )
 
 # Item 1 test executable
@@ -50,6 +51,11 @@ target_link_libraries(test_hot PRIVATE pg_core)
 # Item 8 test executable
 add_executable(test_buffer_pool tests/test_buffer_pool.cpp)
 target_link_libraries(test_buffer_pool PRIVATE pg_core)
+
+# Item 9 test executable
+add_executable(test_wal tests/test_wal.cpp)
+target_link_libraries(test_wal PRIVATE pg_core)
+
 
 
 

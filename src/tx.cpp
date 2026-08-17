@@ -72,4 +72,14 @@ TransactionStatus TransactionManager::get_status(tx_id_t tx_id) const {
     return TransactionStatus::IN_PROGRESS;
 }
 
+void TransactionManager::set_status(tx_id_t tx_id, TransactionStatus status) {
+    status_map_[tx_id] = status;
+    if (status != TransactionStatus::IN_PROGRESS) {
+        active_txs_.erase(tx_id);
+    }
+    if (tx_id >= next_tx_id_) {
+        next_tx_id_ = tx_id + 1;
+    }
+}
+
 } // namespace pg

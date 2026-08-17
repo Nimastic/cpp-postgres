@@ -47,6 +47,9 @@ public:
     // Query status of a transaction
     TransactionStatus get_status(tx_id_t tx_id) const;
 
+    // Set status of a transaction (used during WAL crash recovery)
+    void set_status(tx_id_t tx_id, TransactionStatus status);
+
     // Returns the lowest xmin among all currently active snapshots (or next_tx_id if none active)
     tx_id_t oldest_active_xmin() const;
 
