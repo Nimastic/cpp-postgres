@@ -8,7 +8,7 @@ Not the whole database. Just the parts from that video, plus a few things you bu
 
 One item at a time. When an item works, stop. Do not start the B-tree, the WAL, or a SQL parser early — they do not mean anything until the heap can hand you a CTID and an update can leave two versions of the same row sitting on a page.
 
-Where I am: Item 7 complete (HOT updates placing new tuple on same page, HEAP_HOT_UPDATED/HEAP_ONLY_TUPLE infomask flags, HOT-chain-following index_lookup, zero index writes on non-indexed column updates, and multi-hop chain test). Next is Item 8 (Shared Buffers / Buffer Pool).
+Where I am: Item 8 complete (Shared Buffers / BufferPoolManager, fixed-size memory frames, Clock-Sweep eviction, Pin/Unpin lifecycle, dirty page writeback, and test suite). Next is Item 9 (WAL / Write-Ahead Logging).
 
 A few constants I am sticking to:
 
