@@ -126,8 +126,27 @@ When a cache miss occurs and all buffer frames are occupied, PostgreSQL uses the
 
 ---
 
-## 6. Self-Check & Calibration Questions
+## 7. Quiz Diagnostics & Graded Mechanics
 
-- **Definition (`BUFFER-PIN-COUNT`)**: What happens if the buffer pool is completely full and a query attempts to evict a frame whose `pin_count` is 2?
-- **Mechanism (`CLOCK-SWEEP-SECOND-CHANCE`)**: In the Clock-Sweep algorithm, what does the eviction hand do when it encounters an unpinned frame (`pin_count == 0`) with `usage_count = 1`?
-- **System Design (`DIRTY-PAGE-WRITEBACK`)**: Why does PostgreSQL delay writing dirty buffer frames to disk until eviction or checkpointing instead of writing every `INSERT`/`UPDATE` directly to disk synchronously?
+### Q1 · Buffer Pinning & Eviction Safety (`BUFFER-PIN-COUNT`)
+- **Question**: What happens if the buffer pool is full and all frames have `pin_count > 0`?
+- **Answered**: Option 2 (The engine cannot evict any frame; it must wait for in-flight queries to unpin their pages, avoiding memory corruption of active operations) ✅
+- **Mechanism**:
+  The `pin_count` acts as an active reference count. An actively pinned page represents memory currently being read or modified by an executing transaction. Evicting a pinned page would result in use-after-free, memory corruption, or torn reads.
+
+---
+
+### Q2 · Clock-Sweep Second Chance Mechanics (`CLOCK-SWEEP-SECOND-CHANCE`)
+- **Question**: What does Clock-Sweep do when encountering an unpinned frame with `usage_count = 1`?
+- **Answered**: Option 2 (Decrements `usage_count` to 0, grants a second chance, and advances the clock hand) ✅
+- **Mechanism**:
+  Clock-Sweep approximates LRU without expensive linked-list pointer shuffling. Frequently accessed pages maintain `usage_count > 0` and survive clock hand rotations, while cold unreferenced pages quickly drop to `usage_count = 0` and are selected as eviction victims.
+
+---
+
+### Q3 · Write Buffering & WAL Durability (`DIRTY-PAGE-WRITEBACK`)
+- **Question**: Why does PostgreSQL delay writing dirty pages to disk instead of writing synchronously on every DML?
+- **Answered**: Option 1 (Random 8KB disk writes are $1000\times$ slower than RAM; buffering in RAM batches writes, while durability is guaranteed by fast sequential WAL appends) ✅
+- **Mechanism**:
+  Writing full 8KB pages to random disk locations for single row updates bottlenecks throughput. PostgreSQL modifies the 8KB page in RAM (`shared_buffers`) and immediately writes a tiny (e.g. 40-byte) sequential log record to the Write-Ahead Log (WAL), satisfying ACID durability with minimal I/O overhead.
+
