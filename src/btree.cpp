@@ -74,11 +74,28 @@ std::optional<std::pair<CTID, HeapTuple>> index_lookup(
     const TransactionManager& tm
 ) {
     std::vector<CTID> candidate_ctids = index.find_entries(key);
-    for (const auto& ctid : candidate_ctids) {
-        auto tuple_opt = heap.get(ctid);
-        if (tuple_opt.has_value()) {
+    for (const auto& root_ctid : candidate_ctids) {
+        // Follow the HOT chain starting from this index entry
+        CTID current = root_ctid;
+        size_t max_chain_depth = 100; // Safety limit
+
+        for (size_t depth = 0; depth < max_chain_depth; ++depth) {
+            auto tuple_opt = heap.get(current);
+            if (!tuple_opt.has_value()) {
+                break;
+            }
+
             if (is_tuple_visible(tuple_opt->header, snapshot, tm)) {
-                return std::make_pair(ctid, *tuple_opt);
+                return std::make_pair(current, *tuple_opt);
+            }
+
+            // If this tuple was HOT-updated, follow t_ctid to the next version on same page
+            if ((tuple_opt->header.infomask & HEAP_HOT_UPDATED) &&
+                tuple_opt->header.t_ctid != current &&
+                tuple_opt->header.t_ctid.page == current.page) {
+                current = tuple_opt->header.t_ctid;
+            } else {
+                break; // End of chain or not a HOT chain
             }
         }
     }
@@ -86,3 +103,4 @@ std::optional<std::pair<CTID, HeapTuple>> index_lookup(
 }
 
 } // namespace pg
+

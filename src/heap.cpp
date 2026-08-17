@@ -81,6 +81,54 @@ CTID HeapFile::update(const CTID& old_ctid, const ItemRecord& new_record, tx_id_
     return new_ctid;
 }
 
+std::optional<CTID> HeapFile::hot_update(const CTID& old_ctid, const ItemRecord& new_record, tx_id_t tx_id) {
+    if (!old_ctid.is_valid() || old_ctid.page >= pager_->num_pages()) {
+        return std::nullopt;
+    }
+
+    // Read the page containing the old tuple
+    std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
+    pager_->read_page(old_ctid.page, page_buffer.data());
+    Page page(page_buffer.data());
+
+    // Verify old tuple exists
+    size_t old_len = 0;
+    const uint8_t* old_ptr = page.get_tuple_ptr(old_ctid.slot, &old_len);
+    if (old_ptr == nullptr || old_len < sizeof(HeapTuple)) {
+        return std::nullopt;
+    }
+    HeapTuple old_tuple = HeapTuple::deserialize(old_ptr, old_len);
+
+    // Build the new HOT tuple
+    HeapTuple new_tuple;
+    new_tuple.header.xmin = tx_id;
+    new_tuple.header.xmax = 0;
+    new_tuple.header.infomask = HEAP_ONLY_TUPLE; // Mark as heap-only (not in any index)
+    new_tuple.data = new_record;
+
+    // Try to insert new tuple on the SAME page
+    slot_id_t new_slot = page.insert_tuple(&new_tuple, sizeof(HeapTuple));
+    if (new_slot == INVALID_SLOT_ID) {
+        return std::nullopt; // No room on this page; caller must fall back to regular update
+    }
+
+    CTID new_ctid(old_ctid.page, new_slot);
+
+    // Set t_ctid on the new tuple to point to itself
+    size_t new_len = 0;
+    uint8_t* new_ptr = const_cast<uint8_t*>(page.get_tuple_ptr(new_slot, &new_len));
+    reinterpret_cast<HeapTuple*>(new_ptr)->header.t_ctid = new_ctid;
+
+    // Stamp the old tuple: xmax = tx_id, t_ctid -> new_ctid, flag HEAP_HOT_UPDATED
+    auto* old_mem = reinterpret_cast<HeapTuple*>(const_cast<uint8_t*>(page.get_tuple_ptr(old_ctid.slot, &old_len)));
+    old_mem->header.xmax = tx_id;
+    old_mem->header.t_ctid = new_ctid;
+    old_mem->header.infomask |= HEAP_HOT_UPDATED;
+
+    pager_->write_page(old_ctid.page, page.data());
+    return new_ctid;
+}
+
 bool HeapFile::delete_tuple(const CTID& target_ctid, tx_id_t tx_id) {
     auto tuple_opt = get(target_ctid);
     if (!tuple_opt.has_value()) {

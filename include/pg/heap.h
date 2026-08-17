@@ -35,6 +35,13 @@ public:
     // Non-in-place MVCC update: stamps xmax on old tuple and inserts new tuple with xmin
     CTID update(const CTID& old_ctid, const ItemRecord& new_record, tx_id_t tx_id);
 
+    // HOT (Heap-Only Tuple) update: places new version on SAME page as old version.
+    // Prerequisites: (1) indexed columns did not change, (2) same page has free space.
+    // Returns the new CTID on the same page, or std::nullopt if HOT is not possible.
+    // On success, the old tuple gets HEAP_HOT_UPDATED and the new tuple gets HEAP_ONLY_TUPLE.
+    // NO index writes are needed!
+    std::optional<CTID> hot_update(const CTID& old_ctid, const ItemRecord& new_record, tx_id_t tx_id);
+
     // MVCC delete: stamps xmax on target tuple
     bool delete_tuple(const CTID& target_ctid, tx_id_t tx_id);
 

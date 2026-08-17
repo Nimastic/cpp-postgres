@@ -42,7 +42,9 @@ target_link_libraries(test_vacuum PRIVATE pg_core)
 add_executable(test_index tests/test_index.cpp)
 target_link_libraries(test_index PRIVATE pg_core)
 
-
+# Item 7 test executable
+add_executable(test_hot tests/test_hot.cpp)
+target_link_libraries(test_hot PRIVATE pg_core)
 
 
 
