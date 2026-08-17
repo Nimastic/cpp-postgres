@@ -15,6 +15,7 @@ add_library(pg_core
     src/tx.cpp
     src/mvcc.cpp
     src/vacuum.cpp
+    src/btree.cpp
 )
 
 # Item 1 test executable
@@ -36,6 +37,11 @@ target_link_libraries(test_mvcc PRIVATE pg_core)
 # Item 5 test executable
 add_executable(test_vacuum tests/test_vacuum.cpp)
 target_link_libraries(test_vacuum PRIVATE pg_core)
+
+# Item 6 test executable
+add_executable(test_index tests/test_index.cpp)
+target_link_libraries(test_index PRIVATE pg_core)
+
 
 
 

@@ -8,7 +8,7 @@ Not the whole database. Just the parts from that video, plus a few things you bu
 
 One item at a time. When an item works, stop. Do not start the B-tree, the WAL, or a SQL parser early — they do not mean anything until the heap can hand you a CTID and an update can leave two versions of the same row sitting on a page.
 
-Where I am: Item 5 complete (Vacuum engine, dead tuple detection with oldest_active_xmin horizon, in-place page defragmentation, slot reuse, and test suite). Next is Item 6 (B-Tree Index).
+Where I am: Item 6 complete (B-Tree Index key->CTID mapping, multi-version index entries per key, index_lookup combining B-Tree candidates with MVCC snapshot evaluation, range scan, and test suite). Next is Item 7 (Heap-Only Tuples / HOT).
 
 A few constants I am sticking to:
 
