@@ -65,8 +65,27 @@ Under high-performance database architectures with a **STEAL** buffer policy, di
 
 ---
 
-## 4. Self-Check & Calibration Questions
+## 5. Quiz Diagnostics & Graded Mechanics
 
-- **Definition (`ARIES-LOSER-TRANSACTIONS`)**: What constitutes a "loser transaction" during the ARIES Analysis pass?
-- **Mechanism (`COMPENSATION-LOG-RECORDS-CLR`)**: What is the purpose of writing a Compensation Log Record (CLR) into the WAL while undoing a transaction's modifications?
-- **System Design (`REDO-REPEATING-HISTORY-BEFORE-UNDO`)**: Why does ARIES insist on replaying uncommitted operations during the REDO pass before subsequently rolling them back in the UNDO pass, rather than simply skipping uncommitted operations during REDO?
+### Q1 · Loser Transactions Identification (`ARIES-LOSER-TRANSACTIONS`)
+- **Question**: What constitutes a "loser transaction" during the ARIES Analysis pass?
+- **Answered**: Option 2 (Any transaction that wrote log records to the WAL but never logged a corresponding COMMIT or ABORT record before the end of the log) ✅
+- **Mechanism**:
+  The Analysis pass reconstructs the Active Transaction Table (ATT). Transactions without a terminal COMMIT or ABORT are incomplete losers that must have their physical mutations rolled back.
+
+---
+
+### Q2 · Compensation Log Records Idempotency (`COMPENSATION-LOG-RECORDS-CLR`)
+- **Question**: What is the purpose of writing a CLR into the WAL while undoing modifications?
+- **Answered**: Option 2 (To record that an undo operation was performed so that if another crash occurs mid-recovery, subsequent recovery passes will not redundantly attempt to re-undo already reverted modifications) ✅
+- **Mechanism**:
+  CLRs make the UNDO pass bounded and idempotent. If a secondary crash occurs during recovery, re-running recovery treats CLRs as completed compensations, avoiding infinite rollback cascading.
+
+---
+
+### Q3 · Repeating History Before UNDO (`REDO-REPEATING-HISTORY-BEFORE-UNDO`)
+- **Question**: Why does ARIES replay uncommitted operations during REDO before rolling them back in UNDO?
+- **Answered**: Option 1 (Replaying history exactly as it occurred restores the exact physical state of all pages at crash time, ensuring that the backward UNDO pass operates on deterministic, structurally consistent pages regardless of when buffer pool frames were flushed) ✅
+- **Mechanism**:
+  With a STEAL buffer pool policy, uncommitted writes may have already reached disk while committed writes may not have. Repeating history brings the entire disk state to the exact physical point in time of the crash before logical undo executes.
+
