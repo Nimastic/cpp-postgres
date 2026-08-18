@@ -105,3 +105,29 @@ In real PostgreSQL, **no subsystem ever reads or writes disk pages directly**. A
 - **Definition (`BUFFER-POOL-GATEWAY`)**: Why must all storage engine subsystems route page access through `shared_buffers` rather than reading directly from disk files?
 - **Mechanism (`PIN-UNPIN-DIRTY-LIFECYCLE`)**: Trace the exact pin count and dirty flag transitions when `HeapFile::insert()` places a new tuple on Page 0 through the buffer pool.
 - **System Design (`DELAYED-WRITEBACK-THROUGHPUT`)**: How does buffering dirty pages in RAM reduce total disk I/O when 1,000 consecutive updates occur on the same 8KB page?
+
+---
+
+## 6. Quiz Diagnostics & Graded Mechanics
+
+### Q1 · Single Gateway to Disk Invariant (`BUFFER-POOL-GATEWAY`)
+- **Question**: Why must all storage engine subsystems route page access through `shared_buffers`?
+- **Answered**: Option 2 (To avoid redundant, slow disk I/O by caching active pages in RAM frames and to synchronize concurrent reads and writes through a unified in-memory frame table) ✅
+- **Mechanism**:
+  Direct disk I/O bypasses the shared cache and causes cache incoherency where two readers or writers observe different versions of the same 8KB disk block. The buffer pool guarantees a single, coherent source of truth in memory.
+
+---
+
+### Q2 · Pin/Unpin Dirty Frame Lifecycle (`PIN-UNPIN-DIRTY-LIFECYCLE`)
+- **Question**: What is the lifecycle of a buffer frame when inserting a tuple?
+- **Answered**: Option 2 (`fetch_page(0)` increments `pin_count` (preventing eviction); the tuple is written into frame memory; `unpin_page(0, is_dirty=true)` decrements `pin_count` and marks the frame dirty in RAM so it will be written back upon future eviction or checkpoint) ✅
+- **Mechanism**:
+  Pinning prevents the Clock-Sweep eviction worker from kicking out a page that is currently being modified by a CPU instruction. Marking `is_dirty = true` ensures that when the page is eventually evicted or checkpointed, the modified bytes are written to disk.
+
+---
+
+### Q3 · Write Buffering and Throughput Aggregation (`DELAYED-WRITEBACK-THROUGHPUT`)
+- **Question**: How does buffering dirty pages in RAM reduce disk I/O for rapid consecutive updates on the same page?
+- **Answered**: Option 1 (Direct I/O forces 1,000 separate random 8KB disk writes; with `BufferPoolManager`, all 1,000 updates modify the same resident RAM frame at memory bus speeds, resulting in **only 1 single disk write** when the dirty page is eventually flushed!) ✅
+- **Mechanism**:
+  RAM write buffering coalesces $N$ mutations into a single physical writeback, converting high-frequency random disk write operations into in-memory pointer arithmetic.
