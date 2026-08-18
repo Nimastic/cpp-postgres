@@ -97,8 +97,27 @@ When a leaf node exceeds `BTREE_MAX_LEAF_KEYS = 64`:
 
 ---
 
-## 6. Self-Check & Calibration Questions
+## 7. Quiz Diagnostics & Graded Mechanics
 
-- **Definition (`DISK-BTREE-NODE-TYPES`)**: What is the structural difference between an internal B-Tree node and a leaf B-Tree node on disk?
-- **Mechanism (`BTREE-PAGE-SPLIT-MEDIAN`)**: When a leaf node with 64 keys splits, describe the exact step-by-step redistribution of entries and how the parent node is updated.
-- **System Design (`SIBLING-POINTER-RANGE-SCAN`)**: Why do PostgreSQL B-Tree leaf pages maintain `right_sibling` pointers, and how does this make range scans (e.g. `BETWEEN 100 AND 500`) faster than repeated tree descents?
+### Q1 · B-Tree Node Types Separation (`DISK-BTREE-NODE-TYPES`)
+- **Question**: What is the structural difference between an internal node and a leaf node?
+- **Answered**: Option 2 (Internal nodes store `(Key, Child Page ID)` routing entries to direct tree descent; leaf nodes store `(Key, CTID)` entries pointing directly to physical tuple versions on heap pages) ✅
+- **Mechanism**:
+  Internal nodes act strictly as an index routing directory. Leaf nodes contain the payload pointers (`CTID`), keeping internal nodes lean and maximizing branching fan-out.
+
+---
+
+### Q2 · Median Key Promotion on Split (`BTREE-PAGE-SPLIT-MEDIAN`)
+- **Question**: Describe what happens when a leaf node with 64 keys splits.
+- **Answered**: Option 2 (A new 8KB page is allocated; upper 32 keys are moved to the new page; left page's `right_sibling` points to the new page; and the lowest key of the right page is promoted up into the parent internal node) ✅
+- **Mechanism**:
+  Splitting preserves strict $B^+$-tree invariants: all keys $< \text{median}$ remain in the left node, all keys $\ge \text{median}$ reside in the right node, and the parent node routes searches between them.
+
+---
+
+### Q3 · Sibling Pointer Range Scan Optimization (`SIBLING-POINTER-RANGE-SCAN`)
+- **Question**: Why do PostgreSQL B-Tree leaf pages maintain `right_sibling` pointers?
+- **Answered**: Option 1 (Without sibling pointers, every single next key in the range would require re-descending the B-Tree from root ($O(K \log N)$); with sibling pointers, the engine descends once to the lower bound and scans forward horizontally across leaf pages in $O(K)$ time!) ✅
+- **Mechanism**:
+  The horizontal sibling linked list connects all leaf pages in sorted key order, turning range evaluations (e.g. `BETWEEN A AND B`) into sequential page traversals.
+
