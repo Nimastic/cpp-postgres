@@ -96,6 +96,37 @@ target_link_libraries(test_undo PRIVATE pg_core)
 add_executable(test_toast_integration tests/test_toast_integration.cpp)
 target_link_libraries(test_toast_integration PRIVATE pg_core)
 
+# -----------------------------------------------------------------------------
+# PostgreSQL Native Desktop GUI Explorer (Dear ImGui + DirectX 11)
+# -----------------------------------------------------------------------------
+set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui")
+if(EXISTS "${IMGUI_DIR}/imgui.cpp")
+    set(IMGUI_SOURCES
+        ${IMGUI_DIR}/imgui.cpp
+        ${IMGUI_DIR}/imgui_draw.cpp
+        ${IMGUI_DIR}/imgui_tables.cpp
+        ${IMGUI_DIR}/imgui_widgets.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_win32.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp
+    )
+
+    add_executable(pg_gui WIN32 src/gui/main_gui.cpp ${IMGUI_SOURCES})
+    target_include_directories(pg_gui PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}/include 
+        ${IMGUI_DIR} 
+        ${IMGUI_DIR}/backends
+    )
+    target_link_libraries(pg_gui PRIVATE 
+        pg_core 
+        d3d11 
+        dxgi 
+        d3dcompiler 
+        dwmapi 
+        gdi32
+    )
+endif()
+
+
 
 
 
