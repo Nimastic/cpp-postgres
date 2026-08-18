@@ -11,10 +11,13 @@
 
 namespace pg {
 
+class CLogManager; // Forward declaration
+
 enum class TransactionStatus : uint8_t {
-    IN_PROGRESS = 0,
-    COMMITTED = 1,
-    ABORTED = 2
+    IN_PROGRESS = 0, // 0b00 in CLOG
+    COMMITTED = 1,   // 0b01 in CLOG
+    ABORTED = 2,     // 0b10 in CLOG
+    SUB_COMMITTED = 3// 0b11 in CLOG
 };
 
 struct Snapshot {
@@ -30,7 +33,7 @@ struct Snapshot {
 
 class TransactionManager {
 public:
-    TransactionManager();
+    explicit TransactionManager(CLogManager* clog = nullptr);
 
     // Start a new transaction and obtain its ID
     tx_id_t begin_transaction();
@@ -38,16 +41,16 @@ public:
     // Create a snapshot for a transaction
     Snapshot take_snapshot(tx_id_t tx_id);
 
-    // Commit a transaction
+    // Commit a transaction (writes to RAM and CLOG on disk)
     void commit(tx_id_t tx_id);
 
-    // Abort/Rollback a transaction
+    // Abort/Rollback a transaction (writes to RAM and CLOG on disk)
     void abort(tx_id_t tx_id);
 
-    // Query status of a transaction
+    // Query status of a transaction (checks RAM map, then falls back to persistent CLOG)
     TransactionStatus get_status(tx_id_t tx_id) const;
 
-    // Set status of a transaction (used during WAL crash recovery)
+    // Set status of a transaction (used during WAL crash recovery / CLOG sync)
     void set_status(tx_id_t tx_id, TransactionStatus status);
 
     // Returns the lowest xmin among all currently active snapshots (or next_tx_id if none active)
@@ -55,9 +58,15 @@ public:
 
     // Get current global transaction ID counter
     tx_id_t next_tx_id() const { return next_tx_id_; }
+    void set_next_tx_id(tx_id_t id) { next_tx_id_ = id; }
+
+    // Wire persistent CLOG manager
+    void set_clog(CLogManager* clog) { clog_ = clog; }
+    CLogManager* clog() const { return clog_; }
 
 private:
     tx_id_t next_tx_id_{1};
+    CLogManager* clog_{nullptr};
     std::unordered_map<tx_id_t, TransactionStatus> status_map_;
     std::unordered_set<tx_id_t> active_txs_;
 };

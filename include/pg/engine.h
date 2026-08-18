@@ -12,6 +12,7 @@
 #include "pg/buffer_pool.h"
 #include "pg/wal.h"
 #include "pg/toast.h"
+#include "pg/clog.h"
 #include <string>
 #include <memory>
 #include <optional>
@@ -53,12 +54,14 @@ public:
     WALManager& wal() { return *wal_; }
     BufferPoolManager& bpm() { return *bpm_; }
     ToastManager& toast() { return *toast_; }
+    CLogManager& clog() { return *clog_; }
 
     bool is_in_transaction() const { return current_tx_.has_value(); }
     tx_id_t current_tx_id() const { return current_tx_.value_or(0); }
 
 private:
     std::string db_prefix_;
+    std::unique_ptr<CLogManager> clog_;
     TransactionManager tm_;
     std::unique_ptr<HeapFile> heap_;
     std::unique_ptr<WALManager> wal_;

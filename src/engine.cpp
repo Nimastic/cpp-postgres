@@ -23,6 +23,9 @@ static std::string to_upper(const std::string& str) {
 }
 
 Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
+    clog_ = CLogManager::open(db_prefix_ + "_clog.db");
+    tm_.set_clog(clog_.get());
+
     heap_ = HeapFile::open(db_prefix_ + "_heap.db");
     wal_ = WALManager::open(db_prefix_ + "_wal.log");
     bpm_ = std::make_unique<BufferPoolManager>(heap_->pager(), 16);
@@ -31,10 +34,15 @@ Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
     // Wire buffer pool into heap: all page I/O now goes through shared_buffers
     heap_->set_bpm(bpm_.get());
 
-    // Populate B-Tree index from existing table data
+    // Populate B-Tree index and advance next_tx_id_ from existing table data
     auto all_rows = heap_->seq_scan();
+    tx_id_t max_xid = 0;
     for (const auto& [ctid, tuple] : all_rows) {
         index_.insert_entry(tuple.data.item_id, ctid);
+        max_xid = std::max(max_xid, std::max(tuple.header.xmin, tuple.header.xmax));
+    }
+    if (max_xid > 0) {
+        tm_.set_next_tx_id(max_xid + 1);
     }
 }
 

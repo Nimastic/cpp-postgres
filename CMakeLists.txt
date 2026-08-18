@@ -20,6 +20,7 @@ add_library(pg_core
     src/wal.cpp
     src/toast.cpp
     src/engine.cpp
+    src/clog.cpp
 )
 
 # Interactive SQL REPL CLI Application
@@ -73,6 +74,11 @@ target_link_libraries(test_repl PRIVATE pg_core)
 # Item 12 test executable (Buffer Pool Integration)
 add_executable(test_buffer_integration tests/test_buffer_integration.cpp)
 target_link_libraries(test_buffer_integration PRIVATE pg_core)
+
+# Item 13 test executable (CLOG Commit Status Bitmap)
+add_executable(test_clog tests/test_clog.cpp)
+target_link_libraries(test_clog PRIVATE pg_core)
+
 
 
 

@@ -1,17 +1,24 @@
 #include "pg/tx.h"
+#include "pg/clog.h"
 #include <algorithm>
 
 namespace pg {
 
-TransactionManager::TransactionManager() {
+TransactionManager::TransactionManager(CLogManager* clog) : clog_(clog) {
     // Transaction ID 0 (bootstrap / non-transactional inserts) is always COMMITTED
     status_map_[0] = TransactionStatus::COMMITTED;
+    if (clog_) {
+        clog_->set_status(0, TransactionStatus::COMMITTED);
+    }
 }
 
 tx_id_t TransactionManager::begin_transaction() {
     tx_id_t tx_id = next_tx_id_++;
     status_map_[tx_id] = TransactionStatus::IN_PROGRESS;
     active_txs_.insert(tx_id);
+    if (clog_) {
+        clog_->set_status(tx_id, TransactionStatus::IN_PROGRESS);
+    }
     return tx_id;
 }
 
@@ -39,11 +46,17 @@ Snapshot TransactionManager::take_snapshot(tx_id_t tx_id) {
 void TransactionManager::commit(tx_id_t tx_id) {
     status_map_[tx_id] = TransactionStatus::COMMITTED;
     active_txs_.erase(tx_id);
+    if (clog_) {
+        clog_->set_status(tx_id, TransactionStatus::COMMITTED);
+    }
 }
 
 void TransactionManager::abort(tx_id_t tx_id) {
     status_map_[tx_id] = TransactionStatus::ABORTED;
     active_txs_.erase(tx_id);
+    if (clog_) {
+        clog_->set_status(tx_id, TransactionStatus::ABORTED);
+    }
 }
 
 tx_id_t TransactionManager::oldest_active_xmin() const {
@@ -61,11 +74,19 @@ TransactionStatus TransactionManager::get_status(tx_id_t tx_id) const {
     if (tx_id == 0) {
         return TransactionStatus::COMMITTED;
     }
+
+    // 1. Check RAM status map
     auto it = status_map_.find(tx_id);
     if (it != status_map_.end()) {
         return it->second;
     }
-    // If not recorded and smaller than next_tx_id_, assume committed
+
+    // 2. Check persistent disk CLOG bitmap if available
+    if (clog_) {
+        return clog_->get_status(tx_id);
+    }
+
+    // 3. Fallback: if not recorded and smaller than next_tx_id_, assume committed
     if (tx_id < next_tx_id_) {
         return TransactionStatus::COMMITTED;
     }
@@ -74,6 +95,9 @@ TransactionStatus TransactionManager::get_status(tx_id_t tx_id) const {
 
 void TransactionManager::set_status(tx_id_t tx_id, TransactionStatus status) {
     status_map_[tx_id] = status;
+    if (clog_) {
+        clog_->set_status(tx_id, status);
+    }
     if (status != TransactionStatus::IN_PROGRESS) {
         active_txs_.erase(tx_id);
     }
