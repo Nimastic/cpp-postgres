@@ -31,8 +31,9 @@ Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
     bpm_ = std::make_unique<BufferPoolManager>(heap_->pager(), 16);
     toast_ = ToastManager::open(db_prefix_ + "_toast.db");
 
-    // Wire buffer pool into heap: all page I/O now goes through shared_buffers
+    // Wire buffer pool into heap and WAL: all page I/O now goes through shared_buffers
     heap_->set_bpm(bpm_.get());
+    wal_->set_bpm(bpm_.get());
 
     // Populate B-Tree index and advance next_tx_id_ from existing table data
     auto all_rows = heap_->seq_scan();
@@ -363,6 +364,9 @@ std::string Engine::execute(const std::string& sql) {
     if (upper == "RECOVER") {
         return recover();
     }
+    if (upper == "CHECKPOINT") {
+        return checkpoint();
+    }
 
     // DUMP PAGE <id>
     std::regex dump_regex(R"(^DUMP\s+PAGE\s+(\d+))", std::regex::icase);
@@ -417,6 +421,7 @@ std::string Engine::execute(const std::string& sql) {
         oss << "  VACUUM;                                        - Reclaim dead tuples & defragment\n";
         oss << "  DUMP PAGE 0;                                   - Slotted page physical layout dump\n";
         oss << "  STATUS;                                        - Buffer pool, WAL & Tx diagnostics\n";
+        oss << "  CHECKPOINT;                                    - Flush dirty pages & write checkpoint LSN\n";
         oss << "  RECOVER;                                       - ARIES REDO recovery replay\n";
         oss << "  EXIT / QUIT;                                   - Exit REPL CLI\n";
         return oss.str();
@@ -424,5 +429,14 @@ std::string Engine::execute(const std::string& sql) {
 
     return "[ERROR] Unrecognized SQL command: '" + clean + "'. Type HELP; for syntax.\n";
 }
+
+std::string Engine::checkpoint() {
+    lsn_t lsn = wal_->log_checkpoint();
+    std::ostringstream oss;
+    oss << "[CHECKPOINT] All dirty buffer pool frames flushed to disk. Checkpoint record logged at LSN: " 
+        << lsn << ".\n";
+    return oss.str();
+}
+
 
 } // namespace pg

@@ -46,6 +46,8 @@ public:
     std::string dump_page(page_id_t page_id);
     std::string status();
     std::string recover();
+    std::string checkpoint();
+
 
     // Direct Subsystem Access
     TransactionManager& tm() { return tm_; }

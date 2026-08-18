@@ -1,9 +1,11 @@
 #include "pg/wal.h"
 #include "pg/heap.h"
+#include "pg/buffer_pool.h"
 #include <iostream>
 #include <cstring>
 #include <set>
 #include <unordered_map>
+#include <algorithm>
 
 namespace pg {
 
@@ -33,7 +35,9 @@ bool WALRecord::verify_crc() const {
     return header.crc == calculate_crc();
 }
 
-WALManager::WALManager(const std::string& wal_path) : wal_path_(wal_path) {
+WALManager::WALManager(const std::string& wal_path, BufferPoolManager* bpm)
+    : wal_path_(wal_path), bpm_(bpm)
+{
     stream_.open(wal_path_, std::ios::in | std::ios::out | std::ios::binary);
     if (!stream_.is_open()) {
         stream_.clear();
@@ -58,8 +62,8 @@ WALManager::~WALManager() {
     }
 }
 
-std::unique_ptr<WALManager> WALManager::open(const std::string& wal_path) {
-    return std::make_unique<WALManager>(wal_path);
+std::unique_ptr<WALManager> WALManager::open(const std::string& wal_path, BufferPoolManager* bpm) {
+    return std::make_unique<WALManager>(wal_path, bpm);
 }
 
 lsn_t WALManager::append_record(WALRecordType type, tx_id_t tx_id, page_id_t page_id, slot_id_t slot_id, const void* data, size_t len) {
@@ -120,6 +124,26 @@ lsn_t WALManager::log_abort(tx_id_t tx_id) {
     return lsn;
 }
 
+lsn_t WALManager::log_checkpoint() {
+    // 1. Flush all dirty in-memory pages from buffer pool to disk
+    if (bpm_) {
+        bpm_->flush_all();
+    }
+
+    // 2. Append CHECKPOINT record to WAL
+    lsn_t lsn = append_record(WALRecordType::CHECKPOINT, 0, INVALID_PAGE_ID, INVALID_SLOT_ID, nullptr, 0);
+    checkpoint_lsn_ = lsn;
+    fpi_written_pages_.clear(); // Reset FPI tracking so next page mutations log fresh FPIs
+    flush(lsn);
+    return lsn;
+}
+
+lsn_t WALManager::log_fpi(page_id_t page_id, const void* page_data) {
+    lsn_t lsn = append_record(WALRecordType::FPI, 0, page_id, INVALID_SLOT_ID, page_data, PAGE_SIZE);
+    fpi_written_pages_.insert(page_id);
+    return lsn;
+}
+
 void WALManager::flush(lsn_t target_lsn) {
     if (stream_.is_open()) {
         stream_.flush();
@@ -139,9 +163,11 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
     std::vector<WALRecord> all_records;
     std::set<tx_id_t> committed_txs;
     std::set<tx_id_t> aborted_txs;
+    size_t last_checkpoint_idx = 0;
+    bool found_checkpoint = false;
 
     // -------------------------------------------------------------------------
-    // PASS 1: Scan all records from byte 0, verify CRC, and determine tx outcomes
+    // PASS 1: Scan all records, verify CRCs, identify transaction states & checkpoints
     // -------------------------------------------------------------------------
     while (stream_.good() && stream_.peek() != EOF) {
         WALRecord rec;
@@ -169,26 +195,42 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
         } else if (rec.header.type == WALRecordType::ABORT) {
             aborted_txs.insert(rec.header.tx_id);
             tm.set_status(rec.header.tx_id, TransactionStatus::ABORTED);
+        } else if (rec.header.type == WALRecordType::CHECKPOINT) {
+            last_checkpoint_idx = all_records.size();
+            checkpoint_lsn_ = rec.header.lsn;
+            found_checkpoint = true;
         }
 
         all_records.push_back(std::move(rec));
     }
 
     // -------------------------------------------------------------------------
-    // PASS 2: REDO Replay onto Heap Pages
+    // PASS 2: REDO Replay starting from the LAST CHECKPOINT (Skipping ancient history)
     // -------------------------------------------------------------------------
     size_t replayed_count = 0;
     std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
 
-    for (const auto& rec : all_records) {
+    size_t start_idx = found_checkpoint ? last_checkpoint_idx : 0;
+
+    for (size_t i = start_idx; i < all_records.size(); ++i) {
+        const auto& rec = all_records[i];
         lsn_t record_end_lsn = rec.header.lsn + sizeof(WALRecordHeader) + rec.header.payload_len;
 
-        if (rec.header.type == WALRecordType::INSERT) {
+        if (rec.header.type == WALRecordType::FPI) {
+            // Full Page Image (Torn Page Healing Baseline)
+            page_id_t pid = rec.header.page_id;
+            while (heap.num_pages() <= pid) {
+                heap.pager().allocate_page();
+            }
+            if (rec.payload.size() == PAGE_SIZE) {
+                heap.pager().write_page(pid, rec.payload.data());
+                replayed_count++;
+            }
+        } else if (rec.header.type == WALRecordType::INSERT) {
             if (rec.payload.size() >= sizeof(HeapTuple)) {
                 HeapTuple tuple = HeapTuple::deserialize(rec.payload.data(), rec.payload.size());
                 page_id_t pid = rec.header.page_id;
 
-                // Ensure heap file has allocated pages up to pid
                 while (heap.num_pages() <= pid) {
                     heap.pager().allocate_page();
                     Page fresh_page;
@@ -198,9 +240,7 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
                 heap.pager().read_page(pid, page_buffer.data());
                 Page page(page_buffer.data());
 
-                // Check if page already has this change (LSN idempotency)
                 if (page.header().pd_lsn <= rec.header.lsn) {
-                    // Check if slot exists or needs insertion
                     auto lp_opt = page.get_line_pointer(rec.header.slot_id);
                     if (!lp_opt.has_value() || lp_opt->flags() == ItemFlags::UNUSED) {
                         page.insert_tuple(&tuple, sizeof(HeapTuple));
@@ -225,12 +265,10 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
                 }
 
                 if (old_pid == new_pid) {
-                    // Same-page update
                     heap.pager().read_page(old_pid, page_buffer.data());
                     Page page(page_buffer.data());
 
                     if (page.header().pd_lsn <= rec.header.lsn) {
-                        // 1. Stamp old tuple
                         size_t old_len = 0;
                         const uint8_t* old_ptr = page.get_tuple_ptr(upd.old_ctid.slot, &old_len);
                         if (old_ptr != nullptr && old_len >= sizeof(HeapTuple)) {
@@ -239,7 +277,6 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
                             old_mem->header.t_ctid = upd.new_ctid;
                         }
 
-                        // 2. Insert new tuple
                         auto lp_opt = page.get_line_pointer(upd.new_ctid.slot);
                         if (!lp_opt.has_value() || lp_opt->flags() == ItemFlags::UNUSED) {
                             page.insert_tuple(&upd.new_tuple, sizeof(HeapTuple));
@@ -250,8 +287,6 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
                         replayed_count++;
                     }
                 } else {
-                    // Cross-page update
-                    // 1. Stamp old page
                     heap.pager().read_page(old_pid, page_buffer.data());
                     Page old_page(page_buffer.data());
                     size_t old_len = 0;
@@ -264,7 +299,6 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
                         heap.pager().write_page(old_pid, old_page.data());
                     }
 
-                    // 2. Insert on new page
                     heap.pager().read_page(new_pid, page_buffer.data());
                     Page new_page(page_buffer.data());
                     if (new_page.header().pd_lsn <= rec.header.lsn) {

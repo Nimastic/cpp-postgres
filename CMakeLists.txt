@@ -84,6 +84,11 @@ target_link_libraries(test_clog PRIVATE pg_core)
 add_executable(test_disk_btree tests/test_disk_btree.cpp)
 target_link_libraries(test_disk_btree PRIVATE pg_core)
 
+# Item 15 test executable (WAL Checkpoints & FPI)
+add_executable(test_checkpoint tests/test_checkpoint.cpp)
+target_link_libraries(test_checkpoint PRIVATE pg_core)
+
+
 
 
 
