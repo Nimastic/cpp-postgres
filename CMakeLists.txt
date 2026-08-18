@@ -19,7 +19,12 @@ add_library(pg_core
     src/buffer_pool.cpp
     src/wal.cpp
     src/toast.cpp
+    src/engine.cpp
 )
+
+# Interactive SQL REPL CLI Application
+add_executable(pg_cli src/main.cpp)
+target_link_libraries(pg_cli PRIVATE pg_core)
 
 # Item 1 test executable
 add_executable(test_pager tests/test_pager.cpp)
@@ -60,6 +65,11 @@ target_link_libraries(test_wal PRIVATE pg_core)
 # Item 10 test executable
 add_executable(test_toast tests/test_toast.cpp)
 target_link_libraries(test_toast PRIVATE pg_core)
+
+# Item 11 test executable (End-to-End REPL Capstone)
+add_executable(test_repl tests/test_repl.cpp)
+target_link_libraries(test_repl PRIVATE pg_core)
+
 
 
 
