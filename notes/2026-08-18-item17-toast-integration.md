@@ -91,8 +91,27 @@ PostgreSQL slotted pages are strictly 8KB. A single database row cannot exceed 8
 
 ---
 
-## 4. Self-Check & Calibration Questions
+## 5. Quiz Diagnostics & Graded Mechanics
 
-- **Definition (`TOAST-HEAP-HASEXTERNAL`)**: What does the `HEAP_HASEXTERNAL` infomask flag signify on a heap tuple header?
-- **Mechanism (`TOAST-CHUNKED-REASSEMBLY`)**: How does PostgreSQL prevent oversized attributes (such as 100KB JSON blobs) from causing index bloat or reducing the number of tuples per 8KB heap page?
-- **System Design (`TOAST-READ-AMPLIFICATION-BENEFIT`)**: Why is isolating oversized data into an auxiliary TOAST table beneficial when performing sequential scans that only read non-toasted scalar columns (e.g. `SELECT price FROM items`)?
+### Q1 · TOAST External Storage Flag (`TOAST-HEAP-HASEXTERNAL`)
+- **Question**: What does the `HEAP_HASEXTERNAL` infomask flag signify on a heap tuple header?
+- **Answered**: Option 2 (The tuple contains one or more oversized attributes stored out-of-line in the auxiliary TOAST table and replaced in the main heap tuple by a ToastPointer) ✅
+- **Mechanism**:
+  `HEAP_HASEXTERNAL` instructs the tuple deconstruction engine to inspect attribute offsets for 18-byte `ToastPointer` values rather than parsing inline raw bytes.
+
+---
+
+### Q2 · Index Compactness via TOAST Chunking (`TOAST-CHUNKED-REASSEMBLY`)
+- **Question**: How does PostgreSQL prevent oversized attributes from causing index bloat or reducing tuples per page?
+- **Answered**: Option 1 (By storing only an 18-byte ToastPointer inside the 8KB heap tuple and indexing only search keys in the B-Tree index, while slicing the payload into 2KB chunks in the auxiliary TOAST table) ✅
+- **Mechanism**:
+  Separating oversized attributes prevents physical page overflow and allows secondary B-Tree indices to store only compact scalar keys, keeping tree height shallow and lookups fast.
+
+---
+
+### Q3 · Sequential Scan I/O Efficiency (`TOAST-READ-AMPLIFICATION-BENEFIT`)
+- **Question**: Why is isolating oversized data into an auxiliary TOAST table beneficial when performing sequential scans?
+- **Answered**: Option 1 (Queries that don't project the large column only scan dense, compact 8KB heap pages holding hundreds of rows per page without loading or reading large TOAST pages into shared buffers) ✅
+- **Mechanism**:
+  Heap pages remain dense and narrow. Cold oversized data is never fetched into `shared_buffers` unless explicitly requested by the SQL projection list.
+
