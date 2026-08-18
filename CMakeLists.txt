@@ -92,6 +92,11 @@ target_link_libraries(test_checkpoint PRIVATE pg_core)
 add_executable(test_undo tests/test_undo.cpp)
 target_link_libraries(test_undo PRIVATE pg_core)
 
+# Item 17 test executable (TOAST Heap + Index Full Integration)
+add_executable(test_toast_integration tests/test_toast_integration.cpp)
+target_link_libraries(test_toast_integration PRIVATE pg_core)
+
+
 
 
 

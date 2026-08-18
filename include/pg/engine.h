@@ -37,9 +37,12 @@ public:
 
     // DML
     std::string insert_item(int32_t item_id, int32_t price);
+    std::string insert_item_with_doc(int32_t item_id, int32_t price, const std::string& doc);
     std::string update_item(int32_t item_id, int32_t new_price);
     std::string select_all();
     std::string select_by_id(int32_t item_id);
+    std::string select_doc_by_id(int32_t item_id);
+
 
     // Maintenance & Diagnostics
     std::string vacuum();

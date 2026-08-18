@@ -134,6 +134,71 @@ std::string Engine::insert_item(int32_t item_id, int32_t price) {
     return oss.str();
 }
 
+std::string Engine::insert_item_with_doc(int32_t item_id, int32_t price, const std::string& doc) {
+    bool autocommit = !current_tx_.has_value();
+    if (autocommit) {
+        begin_transaction();
+    }
+
+    tx_id_t tx_id = *current_tx_;
+    ToastValue tv = toast_->store_string(doc);
+
+    CTID ctid = heap_->insert({item_id, price}, tx_id);
+
+    if (!tv.is_inline()) {
+        auto tuple_opt = heap_->get(ctid);
+        if (tuple_opt.has_value()) {
+            TupleHeader hdr = tuple_opt->header;
+            hdr.infomask |= HEAP_HASEXTERNAL;
+            heap_->update_tuple_header(ctid, hdr);
+        }
+    }
+
+    auto tuple_opt = heap_->get(ctid);
+    lsn_t lsn = 0;
+    if (tuple_opt.has_value()) {
+        lsn = wal_->log_insert(tx_id, ctid.page, ctid.slot, *tuple_opt);
+    }
+
+    index_.insert_entry(item_id, ctid);
+
+    std::ostringstream oss;
+    oss << "[Tx " << tx_id << "] INSERT (WITH TOAST): Landed at CTID " << ctid.to_string() 
+        << " (xmin=" << tx_id << ", price=$" << price << "). Document size: " << doc.size() << " bytes (";
+    if (tv.is_inline()) {
+        oss << "INLINE in tuple).\n";
+    } else {
+        oss << "OUT-OF-LINE in TOAST table, " << tv.pointer.chunk_count << " chunks of 2KB, ToastID: " 
+            << tv.pointer.toast_id << ").\n";
+    }
+
+    if (autocommit) {
+        oss << commit_transaction();
+    }
+
+    return oss.str();
+}
+
+std::string Engine::select_doc_by_id(int32_t item_id) {
+    ensure_transaction(true);
+    auto visible_opt = index_lookup(index_, *heap_, item_id, *current_snapshot_, tm_);
+    if (!visible_opt.has_value()) {
+        return "[SELECT] No visible row found with item_id=" + std::to_string(item_id) + ".\n";
+    }
+
+    const auto& [ctid, tuple] = *visible_opt;
+    std::ostringstream oss;
+    oss << "[SELECT TOAST] item_id=" << tuple.data.item_id << ", price=$" << tuple.data.price 
+        << ", CTID=" << ctid.to_string();
+    if (tuple.header.infomask & HEAP_HASEXTERNAL) {
+        oss << " [TOASTED ATTRIBUTE PRESENT]\n";
+    } else {
+        oss << " [INLINE ATTRIBUTE]\n";
+    }
+    return oss.str();
+}
+
+
 std::string Engine::update_item(int32_t item_id, int32_t new_price) {
     bool autocommit = !current_tx_.has_value();
     if (autocommit) {
@@ -376,6 +441,16 @@ std::string Engine::execute(const std::string& sql) {
         return dump_page(pid);
     }
 
+    // INSERT INTO items VALUES (id, price, 'document')
+    std::regex insert_doc_regex(R"(^INSERT\s+(?:INTO\s+items\s+)?(?:VALUES\s*)?\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*'([^']*)'\s*\))", std::regex::icase);
+    std::smatch insert_doc_match;
+    if (std::regex_search(clean, insert_doc_match, insert_doc_regex)) {
+        int32_t item_id = std::stoi(insert_doc_match[1]);
+        int32_t price   = std::stoi(insert_doc_match[2]);
+        std::string doc = insert_doc_match[3];
+        return insert_item_with_doc(item_id, price, doc);
+    }
+
     // INSERT INTO items VALUES (id, price)
     std::regex insert_regex(R"(^INSERT\s+(?:INTO\s+items\s+)?(?:VALUES\s*)?\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\))", std::regex::icase);
     std::smatch insert_match;
@@ -384,6 +459,7 @@ std::string Engine::execute(const std::string& sql) {
         int32_t price   = std::stoi(insert_match[2]);
         return insert_item(item_id, price);
     }
+
 
     // UPDATE items SET price = val WHERE item_id = id
     std::regex update_regex(R"(^UPDATE\s+(?:items\s+)?SET\s+price\s*=\s*(-?\d+)\s+WHERE\s+item_id\s*=\s*(-?\d+))", std::regex::icase);

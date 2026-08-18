@@ -46,9 +46,11 @@ struct TupleHeader {
     uint16_t infomask{0}; // Status flags
 };
 
-// Infomask bit flags for HOT (Heap-Only Tuples)
+// Infomask bit flags for HOT (Heap-Only Tuples) and TOAST
+constexpr uint16_t HEAP_HASEXTERNAL  = 0x2000; // Tuple contains out-of-line TOASTed attributes
 constexpr uint16_t HEAP_HOT_UPDATED  = 0x4000; // This tuple was HOT-updated; t_ctid points to successor on same page
 constexpr uint16_t HEAP_ONLY_TUPLE   = 0x8000; // This tuple is a heap-only tuple (not indexed, reachable only via HOT chain)
+
 
 // Items Table Schema Record (8 bytes)
 struct ItemRecord {
