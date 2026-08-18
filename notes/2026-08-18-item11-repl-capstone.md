@@ -178,8 +178,27 @@ Index Entries    : 2 candidate CTIDs
 
 ---
 
-## 5. Self-Check & Calibration Questions
+## 6. Quiz Diagnostics & Graded Mechanics
 
-- **Definition (`ENGINE-COORDINATION`)**: Which component in our engine arbitrates whether a `SELECT` query uses a B-Tree index scan or a sequential table scan?
-- **Mechanism (`SNAPSHOT-ISOLATION-TRACE`)**: Trace the exact path taken when a client types `SELECT * FROM items WHERE item_id = 100;` inside a long-running transaction from the B-Tree index down to the physical slotted page bytes.
-- **System Design (`TRANSACTIONAL-COMPOSITION`)**: How do MVCC, WAL, and Shared Buffers cooperate during an `INSERT` statement to provide ACID guarantees with high throughput?
+### Q1 · End-to-End Query Coordination (`ENGINE-COORDINATION`)
+- **Question**: What exact path does the engine execute for `SELECT * FROM items WHERE item_id = 100;`?
+- **Answered**: Option 2 (Queries `BTreeIndex` for key `100` to retrieve candidate `CTID` pointers, fetches the candidate tuples from `HeapFile` via `BufferPoolManager`, and evaluates `is_tuple_visible()` against the query's `Snapshot`) ✅
+- **Mechanism**:
+  The index is completely decoupled from row payloads and visibility. The engine uses the index as an accelerator to find physical addresses (`CTID`), and then uses the MVCC snapshot to filter candidate row versions in `shared_buffers`.
+
+---
+
+### Q2 · Concurrent Snapshot Isolation Mechanics (`SNAPSHOT-ISOLATION-TRACE`)
+- **Question**: Why did Session 1 continue seeing `$10` after Session 2 updated item 100 to `$20`?
+- **Answered**: Option 2 (Session 1's `Snapshot` captured `xmax = 4` at `BEGIN`; the `$10` tuple was stamped with `xmax = 4` on update; because `tuple.xmax >= snapshot.xmax`, Session 1 treats the update as occurring in the "future" and considers the `$10` version visible) ✅
+- **Mechanism**:
+  PostgreSQL achieves non-blocking readers and writers without read locks. Both physical tuple versions ($10 and $20) reside concurrently on the page; visibility rules determine what each transaction sees based on frozen snapshot horizons.
+
+---
+
+### Q3 · Full Subsystem Transactional Composition (`TRANSACTIONAL-COMPOSITION`)
+- **Question**: How do MVCC, Shared Buffers, and WAL cooperate during an `UPDATE`?
+- **Answered**: Option 1 (MVCC creates a new tuple version and links `t_ctid`; Shared Buffers modifies the 8KB page in RAM and marks it dirty; WAL appends a sequential log record and forces an `fsync` flush upon `COMMIT`, guaranteeing durability without slow random disk seeks) ✅
+- **Mechanism**:
+  This tripartite architecture is the foundation of high-performance relational databases: MVCC enables concurrency, Buffer Pool enables RAM-speed reads/writes, and Write-Ahead Logging guarantees ACID durability with sequential I/O.
+
