@@ -88,6 +88,11 @@ target_link_libraries(test_disk_btree PRIVATE pg_core)
 add_executable(test_checkpoint tests/test_checkpoint.cpp)
 target_link_libraries(test_checkpoint PRIVATE pg_core)
 
+# Item 16 test executable (ARIES UNDO Recovery Pass)
+add_executable(test_undo tests/test_undo.cpp)
+target_link_libraries(test_undo PRIVATE pg_core)
+
+
 
 
 

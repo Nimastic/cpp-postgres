@@ -26,7 +26,8 @@ enum class WALRecordType : uint8_t {
     COMMIT = 3,
     ABORT = 4,
     CHECKPOINT = 5,
-    FPI = 6 // Full-Page Image (Torn-page protection)
+    FPI = 6, // Full-Page Image (Torn-page protection)
+    CLR = 7  // Compensation Log Record (Undo compensation)
 };
 
 #pragma pack(push, 1)

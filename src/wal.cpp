@@ -4,6 +4,7 @@
 #include <iostream>
 #include <cstring>
 #include <set>
+#include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
 
@@ -161,14 +162,15 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
     stream_.seekg(0, std::ios::beg);
 
     std::vector<WALRecord> all_records;
+    std::set<tx_id_t> all_active_candidates;
     std::set<tx_id_t> committed_txs;
     std::set<tx_id_t> aborted_txs;
     size_t last_checkpoint_idx = 0;
     bool found_checkpoint = false;
 
-    // -------------------------------------------------------------------------
-    // PASS 1: Scan all records, verify CRCs, identify transaction states & checkpoints
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // PASS 1: ANALYSIS PASS (Discover Checkpoint LSN & Active Transaction Table)
+    // =========================================================================
     while (stream_.good() && stream_.peek() != EOF) {
         WALRecord rec;
         stream_.read(reinterpret_cast<char*>(&rec.header), sizeof(WALRecordHeader));
@@ -189,6 +191,10 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
             break;
         }
 
+        if (rec.header.tx_id != 0) {
+            all_active_candidates.insert(rec.header.tx_id);
+        }
+
         if (rec.header.type == WALRecordType::COMMIT) {
             committed_txs.insert(rec.header.tx_id);
             tm.set_status(rec.header.tx_id, TransactionStatus::COMMITTED);
@@ -204,9 +210,18 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
         all_records.push_back(std::move(rec));
     }
 
-    // -------------------------------------------------------------------------
-    // PASS 2: REDO Replay starting from the LAST CHECKPOINT (Skipping ancient history)
-    // -------------------------------------------------------------------------
+    // Active Transaction Table (ATT): Loser transactions that never committed or aborted
+    std::unordered_set<tx_id_t> active_tx_table;
+    for (tx_id_t tx_id : all_active_candidates) {
+        if (committed_txs.find(tx_id) == committed_txs.end() &&
+            aborted_txs.find(tx_id) == aborted_txs.end()) {
+            active_tx_table.insert(tx_id);
+        }
+    }
+
+    // =========================================================================
+    // PASS 2: REDO PASS (Repeating History Forward from Checkpoint)
+    // =========================================================================
     size_t replayed_count = 0;
     std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
 
@@ -217,7 +232,7 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
         lsn_t record_end_lsn = rec.header.lsn + sizeof(WALRecordHeader) + rec.header.payload_len;
 
         if (rec.header.type == WALRecordType::FPI) {
-            // Full Page Image (Torn Page Healing Baseline)
+            // Full Page Image Baseline
             page_id_t pid = rec.header.page_id;
             while (heap.num_pages() <= pid) {
                 heap.pager().allocate_page();
@@ -313,6 +328,101 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // PASS 3: UNDO PASS (Rolling Back In-Progress Loser Transactions with CLRs)
+    // =========================================================================
+    if (!active_tx_table.empty()) {
+        for (int i = static_cast<int>(all_records.size()) - 1; i >= static_cast<int>(start_idx); --i) {
+            const auto& rec = all_records[i];
+            if (active_tx_table.find(rec.header.tx_id) != active_tx_table.end()) {
+                if (rec.header.type == WALRecordType::INSERT) {
+                    // Undo INSERT: Mark slot as UNUSED on page
+                    page_id_t pid = rec.header.page_id;
+                    if (pid < heap.num_pages()) {
+                        heap.pager().read_page(pid, page_buffer.data());
+                        Page page(page_buffer.data());
+
+                        LinePointer dead_lp;
+                        dead_lp.set(0, 0, ItemFlags::UNUSED);
+                        page.set_line_pointer(rec.header.slot_id, dead_lp);
+
+                        heap.pager().write_page(pid, page.data());
+
+                        // Log Compensation Log Record (CLR) to WAL
+                        append_record(WALRecordType::CLR, rec.header.tx_id, pid, rec.header.slot_id, nullptr, 0);
+                    }
+                } else if (rec.header.type == WALRecordType::UPDATE) {
+                    // Undo UPDATE: Revert old tuple's xmax and mark new tuple as UNUSED
+                    if (rec.payload.size() >= sizeof(WALUpdatePayload)) {
+                        WALUpdatePayload upd;
+                        std::memcpy(&upd, rec.payload.data(), sizeof(WALUpdatePayload));
+
+                        if (upd.old_ctid.page == upd.new_ctid.page) {
+                            // Same-page update undo
+                            page_id_t pid = upd.old_ctid.page;
+                            if (pid < heap.num_pages()) {
+                                heap.pager().read_page(pid, page_buffer.data());
+                                Page page(page_buffer.data());
+
+                                // 1. Revert old tuple xmax to 0
+                                size_t old_len = 0;
+                                const uint8_t* old_ptr = page.get_tuple_ptr(upd.old_ctid.slot, &old_len);
+                                if (old_ptr != nullptr && old_len >= sizeof(HeapTuple)) {
+                                    auto* old_mem = reinterpret_cast<HeapTuple*>(const_cast<uint8_t*>(old_ptr));
+                                    old_mem->header.xmax = 0;
+                                    old_mem->header.t_ctid = upd.old_ctid;
+                                }
+
+                                // 2. Mark new slot as UNUSED
+                                LinePointer dead_lp;
+                                dead_lp.set(0, 0, ItemFlags::UNUSED);
+                                page.set_line_pointer(upd.new_ctid.slot, dead_lp);
+
+                                heap.pager().write_page(pid, page.data());
+                            }
+                        } else {
+                            // Cross-page update undo
+                            // 1. Revert old tuple on old page
+                            if (upd.old_ctid.page < heap.num_pages()) {
+                                heap.pager().read_page(upd.old_ctid.page, page_buffer.data());
+                                Page old_page(page_buffer.data());
+                                size_t old_len = 0;
+                                const uint8_t* old_ptr = old_page.get_tuple_ptr(upd.old_ctid.slot, &old_len);
+                                if (old_ptr != nullptr && old_len >= sizeof(HeapTuple)) {
+                                    auto* old_mem = reinterpret_cast<HeapTuple*>(const_cast<uint8_t*>(old_ptr));
+                                    old_mem->header.xmax = 0;
+                                    old_mem->header.t_ctid = upd.old_ctid;
+                                    heap.pager().write_page(upd.old_ctid.page, old_page.data());
+                                }
+                            }
+
+                            // 2. Mark new tuple unused on new page
+                            if (upd.new_ctid.page < heap.num_pages()) {
+                                heap.pager().read_page(upd.new_ctid.page, page_buffer.data());
+                                Page new_page(page_buffer.data());
+                                LinePointer dead_lp;
+                                dead_lp.set(0, 0, ItemFlags::UNUSED);
+                                new_page.set_line_pointer(upd.new_ctid.slot, dead_lp);
+                                heap.pager().write_page(upd.new_ctid.page, new_page.data());
+                            }
+                        }
+
+                        // Log CLR
+                        append_record(WALRecordType::CLR, rec.header.tx_id, upd.new_ctid.page, upd.new_ctid.slot, nullptr, 0);
+                    }
+                }
+            }
+        }
+
+        // Set all loser transactions as ABORTED in tm (which writes to CLOG)
+        for (tx_id_t tx_id : active_tx_table) {
+            tm.set_status(tx_id, TransactionStatus::ABORTED);
+            log_abort(tx_id);
+        }
+
+        flush();
     }
 
     return replayed_count;
