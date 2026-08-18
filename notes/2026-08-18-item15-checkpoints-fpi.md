@@ -67,8 +67,27 @@ Normal WAL delta records only say: *"change price from $10 to $20 at offset 8120
 
 ---
 
-## 4. Self-Check & Calibration Questions
+## 5. Quiz Diagnostics & Graded Mechanics
 
-- **Definition (`CHECKPOINT-RECOVERY-HORIZON`)**: What is the primary purpose of writing periodic `CHECKPOINT` records to the PostgreSQL WAL?
-- **Mechanism (`TORN-PAGE-FPI-HEALING`)**: Why does PostgreSQL write an 8KB Full-Page Image (FPI) on the *first* modification of a page after a checkpoint, but uses compact delta records for subsequent modifications?
-- **System Design (`CHECKPOINT-THROUGHPUT-TRADE-OFF`)**: What is the performance trade-off of running checkpoints very frequently (e.g. every 5 seconds) versus infrequently (e.g. every 30 minutes)?
+### Q1 · Checkpoint Recovery Horizon Truncation (`CHECKPOINT-RECOVERY-HORIZON`)
+- **Question**: What is the primary purpose of writing periodic `CHECKPOINT` records?
+- **Answered**: Option 2 (To flush dirty buffer pool pages to disk and establish a known durable baseline so crash recovery only needs to replay WAL records written after the checkpoint LSN rather than scanning from byte 0) ✅
+- **Mechanism**:
+  Checkpoints establish a physical synchronization point where on-disk table pages match in-memory modifications. Replay before the checkpoint LSN is redundant, capping recovery duration to the volume of WAL generated since the checkpoint.
+
+---
+
+### Q2 · Torn-Page Healing via Full-Page Images (`TORN-PAGE-FPI-HEALING`)
+- **Question**: Why does PostgreSQL write an 8KB FPI on the first modification after a checkpoint, but compact deltas thereafter?
+- **Answered**: Option 1 (Writing 8KB on every update causes massive I/O bloat, but the first write provides an uncorrupted 8KB baseline to heal torn pages resulting from partial sector writes during a crash) ✅
+- **Mechanism**:
+  If a crash occurs mid-write on an 8KB block, disk sectors are inconsistent. Replaying delta offsets on a torn page causes fatal memory corruption. The FPI overwrites the broken block with a pristine whole-page baseline before deltas are applied.
+
+---
+
+### Q3 · Checkpoint Frequency Trade-off (`CHECKPOINT-THROUGHPUT-TRADE-OFF`)
+- **Question**: What is the trade-off of running checkpoints very frequently vs infrequently?
+- **Answered**: Option 1 (Frequent checkpoints provide faster recovery times but cause high I/O write spikes by flushing dirty pages and triggering FPIs; infrequent checkpoints maximize normal write throughput but result in longer recovery times during crash startup) ✅
+- **Mechanism**:
+  Frequent checkpoints incur repeated dirty buffer writeback and force new FPI records on subsequent writes. Tuning checkpoint intervals balances steady-state transaction latency against Mean Time to Recovery (MTTR).
+
