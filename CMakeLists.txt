@@ -21,6 +21,7 @@ add_library(pg_core
     src/toast.cpp
     src/engine.cpp
     src/clog.cpp
+    src/disk_btree.cpp
 )
 
 # Interactive SQL REPL CLI Application
@@ -78,6 +79,11 @@ target_link_libraries(test_buffer_integration PRIVATE pg_core)
 # Item 13 test executable (CLOG Commit Status Bitmap)
 add_executable(test_clog tests/test_clog.cpp)
 target_link_libraries(test_clog PRIVATE pg_core)
+
+# Item 14 test executable (Disk B-Tree with Node Splits)
+add_executable(test_disk_btree tests/test_disk_btree.cpp)
+target_link_libraries(test_disk_btree PRIVATE pg_core)
+
 
 
 
