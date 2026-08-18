@@ -70,7 +70,9 @@ target_link_libraries(test_toast PRIVATE pg_core)
 add_executable(test_repl tests/test_repl.cpp)
 target_link_libraries(test_repl PRIVATE pg_core)
 
-
+# Item 12 test executable (Buffer Pool Integration)
+add_executable(test_buffer_integration tests/test_buffer_integration.cpp)
+target_link_libraries(test_buffer_integration PRIVATE pg_core)
 
 
 

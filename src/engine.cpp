@@ -28,6 +28,9 @@ Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
     bpm_ = std::make_unique<BufferPoolManager>(heap_->pager(), 16);
     toast_ = ToastManager::open(db_prefix_ + "_toast.db");
 
+    // Wire buffer pool into heap: all page I/O now goes through shared_buffers
+    heap_->set_bpm(bpm_.get());
+
     // Populate B-Tree index from existing table data
     auto all_rows = heap_->seq_scan();
     for (const auto& [ctid, tuple] : all_rows) {
@@ -232,6 +235,11 @@ std::string Engine::vacuum() {
 std::string Engine::dump_page(page_id_t page_id) {
     if (page_id >= heap_->num_pages()) {
         return "[ERROR] Invalid page_id " + std::to_string(page_id) + ". Table has " + std::to_string(heap_->num_pages()) + " pages.\n";
+    }
+
+    // Flush dirty buffer pool pages to disk so we read fresh data
+    if (bpm_) {
+        bpm_->flush_all();
     }
 
     std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);

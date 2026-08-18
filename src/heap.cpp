@@ -1,9 +1,12 @@
 #include "pg/heap.h"
+#include "pg/buffer_pool.h"
 #include <iostream>
 
 namespace pg {
 
-HeapFile::HeapFile(std::unique_ptr<Pager> pager) : pager_(std::move(pager)) {
+HeapFile::HeapFile(std::unique_ptr<Pager> pager, BufferPoolManager* bpm)
+    : pager_(std::move(pager)), bpm_(bpm)
+{
     if (pager_ && pager_->num_pages() == 0) {
         // Automatically allocate and initialize Page 0 for a new heap file
         page_id_t pid = pager_->allocate_page();
@@ -12,9 +15,39 @@ HeapFile::HeapFile(std::unique_ptr<Pager> pager) : pager_(std::move(pager)) {
     }
 }
 
-std::unique_ptr<HeapFile> HeapFile::open(const std::string& filepath) {
+std::unique_ptr<HeapFile> HeapFile::open(const std::string& filepath, BufferPoolManager* bpm) {
     auto pager = Pager::open(filepath);
-    return std::make_unique<HeapFile>(std::move(pager));
+    return std::make_unique<HeapFile>(std::move(pager), bpm);
+}
+
+// Internal helper: read a page through BPM if available, else direct Pager
+Page HeapFile::read_page_internal(page_id_t page_id, std::vector<uint8_t>& buffer) {
+    if (bpm_) {
+        Page* p = bpm_->fetch_page(page_id);
+        if (p) {
+            // Copy into caller's buffer so we can unpin immediately for read-only ops
+            std::memcpy(buffer.data(), p->data(), PAGE_SIZE);
+            bpm_->unpin_page(page_id, false);
+            return Page(buffer.data());
+        }
+    }
+    // Fallback: direct Pager
+    pager_->read_page(page_id, buffer.data());
+    return Page(buffer.data());
+}
+
+// Internal helper: write a page through BPM if available, else direct Pager
+void HeapFile::write_page_internal(page_id_t page_id, const Page& page) {
+    if (bpm_) {
+        Page* p = bpm_->fetch_page(page_id);
+        if (p) {
+            std::memcpy(p->data(), page.data(), PAGE_SIZE);
+            bpm_->unpin_page(page_id, true); // Mark dirty
+            return;
+        }
+    }
+    // Fallback: direct Pager
+    pager_->write_page(page_id, page.data());
 }
 
 CTID HeapFile::insert(const ItemRecord& record, tx_id_t xmin) {
@@ -26,9 +59,8 @@ CTID HeapFile::insert(const ItemRecord& record, tx_id_t xmin) {
 
     page_id_t target_page_id = static_cast<page_id_t>(pager_->num_pages() - 1);
     std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
-    pager_->read_page(target_page_id, page_buffer.data());
+    Page page = read_page_internal(target_page_id, page_buffer);
 
-    Page page(page_buffer.data());
     slot_id_t slot = page.insert_tuple(&tuple, sizeof(HeapTuple));
 
     if (slot != INVALID_SLOT_ID) {
@@ -38,7 +70,7 @@ CTID HeapFile::insert(const ItemRecord& record, tx_id_t xmin) {
         uint8_t* tuple_mem = const_cast<uint8_t*>(page.get_tuple_ptr(slot, &tuple_len));
         reinterpret_cast<HeapTuple*>(tuple_mem)->header.t_ctid = assigned_ctid;
 
-        pager_->write_page(target_page_id, page.data());
+        write_page_internal(target_page_id, page);
         return assigned_ctid;
     }
 
@@ -55,7 +87,7 @@ CTID HeapFile::insert(const ItemRecord& record, tx_id_t xmin) {
     uint8_t* tuple_mem = const_cast<uint8_t*>(new_page.get_tuple_ptr(new_slot, &tuple_len));
     reinterpret_cast<HeapTuple*>(tuple_mem)->header.t_ctid = assigned_ctid;
 
-    pager_->write_page(new_page_id, new_page.data());
+    write_page_internal(new_page_id, new_page);
     return assigned_ctid;
 }
 
@@ -88,8 +120,7 @@ std::optional<CTID> HeapFile::hot_update(const CTID& old_ctid, const ItemRecord&
 
     // Read the page containing the old tuple
     std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
-    pager_->read_page(old_ctid.page, page_buffer.data());
-    Page page(page_buffer.data());
+    Page page = read_page_internal(old_ctid.page, page_buffer);
 
     // Verify old tuple exists
     size_t old_len = 0;
@@ -125,7 +156,7 @@ std::optional<CTID> HeapFile::hot_update(const CTID& old_ctid, const ItemRecord&
     old_mem->header.t_ctid = new_ctid;
     old_mem->header.infomask |= HEAP_HOT_UPDATED;
 
-    pager_->write_page(old_ctid.page, page.data());
+    write_page_internal(old_ctid.page, page);
     return new_ctid;
 }
 
@@ -146,9 +177,8 @@ std::optional<HeapTuple> HeapFile::get(const CTID& ctid) {
     }
 
     std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
-    pager_->read_page(ctid.page, page_buffer.data());
+    Page page = read_page_internal(ctid.page, page_buffer);
 
-    Page page(page_buffer.data());
     size_t len = 0;
     const uint8_t* ptr = page.get_tuple_ptr(ctid.slot, &len);
     if (ptr == nullptr || len < sizeof(HeapTuple)) {
@@ -164,9 +194,8 @@ bool HeapFile::update_tuple_header(const CTID& ctid, const TupleHeader& new_head
     }
 
     std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
-    pager_->read_page(ctid.page, page_buffer.data());
+    Page page = read_page_internal(ctid.page, page_buffer);
 
-    Page page(page_buffer.data());
     size_t len = 0;
     const uint8_t* ptr = page.get_tuple_ptr(ctid.slot, &len);
     if (ptr == nullptr || len < sizeof(HeapTuple)) {
@@ -176,7 +205,7 @@ bool HeapFile::update_tuple_header(const CTID& ctid, const TupleHeader& new_head
     auto* tuple_ptr = reinterpret_cast<HeapTuple*>(const_cast<uint8_t*>(ptr));
     tuple_ptr->header = new_header;
 
-    pager_->write_page(ctid.page, page.data());
+    write_page_internal(ctid.page, page);
     return true;
 }
 
@@ -186,8 +215,7 @@ std::vector<std::pair<CTID, HeapTuple>> HeapFile::seq_scan() {
     std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
 
     for (page_id_t pid = 0; pid < total_pages; ++pid) {
-        pager_->read_page(pid, page_buffer.data());
-        Page page(page_buffer.data());
+        Page page = read_page_internal(pid, page_buffer);
 
         size_t slots = page.num_slots();
         for (slot_id_t s = 1; s <= slots; ++s) {

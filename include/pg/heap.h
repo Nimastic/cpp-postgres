@@ -12,9 +12,12 @@
 
 namespace pg {
 
+// Forward declare to avoid circular dependency
+class BufferPoolManager;
+
 class HeapFile {
 public:
-    explicit HeapFile(std::unique_ptr<Pager> pager);
+    explicit HeapFile(std::unique_ptr<Pager> pager, BufferPoolManager* bpm = nullptr);
     ~HeapFile() = default;
 
     // Disable copy
@@ -26,7 +29,7 @@ public:
     HeapFile& operator=(HeapFile&&) noexcept = default;
 
     // Factory method
-    static std::unique_ptr<HeapFile> open(const std::string& filepath);
+    static std::unique_ptr<HeapFile> open(const std::string& filepath, BufferPoolManager* bpm = nullptr);
 
     // Insert a new ItemRecord into the heap. Returns the assigned CTID.
     // If all existing pages are full, a new 8KB page is automatically allocated.
@@ -62,8 +65,17 @@ public:
     const Pager& pager() const { return *pager_; }
     size_t num_pages() const { return pager_->num_pages(); }
 
+    // Buffer pool access
+    BufferPoolManager* bpm() { return bpm_; }
+    void set_bpm(BufferPoolManager* bpm) { bpm_ = bpm; }
+
 private:
     std::unique_ptr<Pager> pager_;
+    BufferPoolManager* bpm_{nullptr}; // Optional: when non-null, all I/O goes through shared_buffers
+
+    // Internal helpers: read/write pages through BPM when available, else direct Pager
+    Page read_page_internal(page_id_t page_id, std::vector<uint8_t>& buffer);
+    void write_page_internal(page_id_t page_id, const Page& page);
 };
 
 } // namespace pg
