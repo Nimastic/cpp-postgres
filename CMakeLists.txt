@@ -32,6 +32,10 @@ target_link_libraries(pg_core PUBLIC ws2_32)
 add_executable(pg_cli src/main.cpp)
 target_link_libraries(pg_cli PRIVATE pg_core)
 
+# Unified Server Daemon (HTTP REST Port 8080 + PostgreSQL Wire Protocol Port 5432)
+add_executable(pg_server src/server_main.cpp)
+target_link_libraries(pg_server PRIVATE pg_core)
+
 # Item 1 test executable
 add_executable(test_pager tests/test_pager.cpp)
 target_link_libraries(test_pager PRIVATE pg_core)
