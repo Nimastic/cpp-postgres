@@ -23,6 +23,7 @@ add_library(pg_core
     src/clog.cpp
     src/disk_btree.cpp
     src/http_server.cpp
+    src/pgwire.cpp
 )
 
 target_link_libraries(pg_core PUBLIC ws2_32)
@@ -102,6 +103,10 @@ target_link_libraries(test_toast_integration PRIVATE pg_core)
 # Item 18 test executable (Embedded HTTP/REST API Server - Approach A)
 add_executable(test_http_server tests/test_http_server.cpp)
 target_link_libraries(test_http_server PRIVATE pg_core)
+
+# Item 19 test executable (PostgreSQL Wire Protocol Server - Approach C)
+add_executable(test_pgwire tests/test_pgwire.cpp)
+target_link_libraries(test_pgwire PRIVATE pg_core)
 
 # -----------------------------------------------------------------------------
 # PostgreSQL Native Desktop GUI Explorer (Dear ImGui + DirectX 11)
