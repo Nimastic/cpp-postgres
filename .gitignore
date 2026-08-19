@@ -24,3 +24,7 @@ out/
 
 # Submodule / tool directories to ignore per request
 learn-with-ai/
+
+# GUI runtime configuration
+imgui.ini
+
