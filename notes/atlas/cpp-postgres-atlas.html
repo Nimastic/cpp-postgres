@@ -1,65 +1,164 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><title>PostgreSQL Storage Engine Architecture Atlas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <style>
-  :root { --ink:#1a1a1a; --muted:#666; --rule:#d8d8d4; --accent:#2c5aa0; --bg:#fff; }
-  @page { size: A4; margin: 18mm 16mm 20mm 16mm; }
+  :root { 
+    --ink: #1e293b; 
+    --muted: #64748b; 
+    --rule: #e2e8f0; 
+    --accent: #2563eb; 
+    --accent-dark: #1d4ed8; 
+    --bg: #ffffff; 
+    --surface: #f8fafc;
+    --code-bg: #f1f5f9;
+  }
+  @page { size: A4; margin: 16mm 15mm 18mm 15mm; }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink);
-         font: 10.5pt/1.62 "Charter","Bitstream Charter","Georgia",serif; }
-  code, pre, .mono { font-family: "Cascadia Code","JetBrains Mono","Consolas",monospace; }
+  body { 
+    margin: 0; 
+    background: var(--bg); 
+    color: var(--ink);
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 10pt;
+    line-height: 1.65;
+    letter-spacing: -0.011em;
+    -webkit-font-smoothing: antialiased;
+  }
+  code, pre, .mono { 
+    font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace; 
+  }
 
-  .titlepage { height: 96vh; display:flex; flex-direction:column; justify-content:center;
-               page-break-after: always; }
-  .titlepage h1 { font-size: 30pt; line-height:1.15; margin:0 0 .4em; letter-spacing:-.01em; }
-  .titlepage .sub { color:var(--muted); font-size:12pt; }
-  .titlepage .meta { margin-top:auto; color:var(--muted); font-size:9pt; }
+  .titlepage { 
+    height: 94vh; 
+    display: flex; 
+    flex-direction: column; 
+    justify-content: center;
+    page-break-after: always; 
+  }
+  .titlepage h1 { 
+    font-family: "Plus Jakarta Sans", "Inter", sans-serif;
+    font-size: 32pt; 
+    font-weight: 800;
+    line-height: 1.15; 
+    margin: 0 0 .4em; 
+    letter-spacing: -0.03em;
+    color: #0f172a;
+  }
+  .titlepage .sub { 
+    color: var(--muted); 
+    font-size: 13pt; 
+    font-weight: 500;
+  }
+  .titlepage .meta { 
+    margin-top: auto; 
+    color: var(--muted); 
+    font-size: 9pt; 
+    font-family: "JetBrains Mono", monospace;
+  }
 
   nav.toc { page-break-after: always; }
-  nav.toc h2 { font-size:17pt; margin:0 0 1em; padding-bottom:.35em; border-bottom:2px solid var(--ink); }
-  nav.toc ol { list-style:none; padding:0; margin:0; }
-  nav.toc > ol > li { margin:.5em 0; font-weight:600; }
-  nav.toc ol ol { margin:.15em 0 .5em 1.4em; font-weight:400; font-size:9.5pt; }
-  nav.toc ol ol li { margin:.1em 0; color:#333; }
-  nav.toc a { color:inherit; text-decoration:none; }
-  nav.toc .num { color:var(--accent); font-variant-numeric:tabular-nums; margin-right:.5em; }
+  nav.toc h2 { 
+    font-family: "Plus Jakarta Sans", "Inter", sans-serif;
+    font-size: 18pt; 
+    font-weight: 700;
+    margin: 0 0 1em; 
+    padding-bottom: .4em; 
+    border-bottom: 2px solid #0f172a; 
+    letter-spacing: -0.02em;
+  }
+  nav.toc ol { list-style: none; padding: 0; margin: 0; }
+  nav.toc > ol > li { margin: .55em 0; font-weight: 600; font-size: 10.5pt; }
+  nav.toc ol ol { margin: .2em 0 .5em 1.4em; font-weight: 400; font-size: 9.5pt; }
+  nav.toc ol ol li { margin: .15em 0; color: #334155; }
+  nav.toc a { color: inherit; text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); }
+  nav.toc .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .5em; font-family: "JetBrains Mono", monospace; }
 
   section.chapter { page-break-before: always; }
-  h1,h2,h3,h4 { line-height:1.25; page-break-after:avoid; font-weight:650; }
-  h1 { font-size:21pt; margin:0 0 .8em; padding-bottom:.3em; border-bottom:1px solid var(--rule); }
-  h2 { font-size:14pt; margin:1.8em 0 .5em; }
-  h3 { font-size:11.5pt; margin:1.4em 0 .4em; }
-  h4 { font-size:10.5pt; margin:1.2em 0 .3em; color:var(--muted); }
-  p { margin:0 0 .75em; orphans:3; widows:3; }
-  ul,ol { margin:0 0 .8em; padding-left:1.4em; }
-  li { margin:.18em 0; }
-  a { color:var(--accent); }
+  h1, h2, h3, h4 { 
+    font-family: "Plus Jakarta Sans", "Inter", sans-serif;
+    line-height: 1.25; 
+    page-break-after: avoid; 
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #0f172a;
+  }
+  h1 { 
+    font-size: 20pt; 
+    margin: 0 0 .7em; 
+    padding-bottom: .35em; 
+    border-bottom: 2px solid var(--rule); 
+  }
+  h2 { font-size: 13.5pt; margin: 1.6em 0 .5em; }
+  h3 { font-size: 11pt; margin: 1.3em 0 .4em; color: #1e293b; }
+  h4 { font-size: 10pt; margin: 1.1em 0 .3em; color: var(--muted); font-weight: 600; }
+  p { margin: 0 0 .8em; orphans: 3; widows: 3; }
+  ul, ol { margin: 0 0 .8em; padding-left: 1.4em; }
+  li { margin: .22em 0; }
+  a { color: var(--accent); text-decoration: none; }
 
-  pre { background:#f7f7f5; border:1px solid var(--rule); border-left:3px solid var(--accent);
-        border-radius:3px; padding:.7em .9em; overflow-x:auto; font-size:8.6pt; line-height:1.5;
-        page-break-inside:avoid; margin:0 0 1em; }
-  :not(pre) > code { background:#f2f2ef; padding:.1em .35em; border-radius:3px; font-size:.88em; }
+  pre { 
+    background: var(--code-bg); 
+    border: 1px solid var(--rule); 
+    border-left: 3px solid var(--accent);
+    border-radius: 6px; 
+    padding: .8em 1em; 
+    overflow-x: auto; 
+    font-size: 8.5pt; 
+    line-height: 1.55;
+    page-break-inside: avoid; 
+    margin: 0 0 1.1em; 
+  }
+  :not(pre) > code { 
+    background: var(--code-bg); 
+    color: #0f172a;
+    padding: .15em .4em; 
+    border-radius: 4px; 
+    font-size: .88em; 
+    border: 1px solid #e2e8f0;
+  }
 
-  blockquote { margin:0 0 1em; padding:.1em 0 .1em 1em; border-left:3px solid var(--rule);
-               color:#444; }
-  table { border-collapse:collapse; width:100%; margin:0 0 1.1em; font-size:9pt;
-          page-break-inside:avoid; }
-  th,td { border:1px solid var(--rule); padding:.4em .6em; text-align:left; vertical-align:top; }
-  th { background:#f4f4f1; font-weight:650; }
+  blockquote { 
+    margin: 0 0 1.1em; 
+    padding: .3em 0 .3em 1.1em; 
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    border-radius: 0 4px 4px 0;
+    color: #334155; 
+  }
+  table { 
+    border-collapse: collapse; 
+    width: 100%; 
+    margin: 0 0 1.2em; 
+    font-size: 9pt;
+    page-break-inside: avoid; 
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  th, td { border: 1px solid var(--rule); padding: .45em .7em; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; font-weight: 600; color: #0f172a; }
 
-  .mermaid { page-break-inside:avoid; margin:1em 0 1.3em; text-align:center; }
-  .mermaid svg { max-width:100%; height:auto; }
-  .mermaid-failed { border:1px dashed #b45f06; background:#fff8f0; padding:.6em .8em;
-                    font-size:8.5pt; margin:0 0 1em; }
+  .mermaid { page-break-inside: avoid; margin: 1.1em 0 1.4em; text-align: center; }
+  .mermaid svg { max-width: 100%; height: auto; }
+  .mermaid-failed { 
+    border: 1px dashed #ef4444; 
+    background: #fef2f2; 
+    padding: .6em .8em;
+    font-size: 8.5pt; 
+    margin: 0 0 1em; 
+  }
 
-  img { max-width:100%; page-break-inside:avoid; }
-  hr { border:0; border-top:1px solid var(--rule); margin:1.6em 0; }
-  .src { color:var(--muted); font-size:8pt; font-family:inherit; }
+  img { max-width: 100%; page-break-inside: avoid; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 1.6em 0; }
+  .src { color: var(--muted); font-size: 8pt; font-family: "JetBrains Mono", monospace; }
 </style></head>
 <body>
 <div class="titlepage">
   <h1>PostgreSQL Storage Engine Architecture Atlas</h1>
-  <div class="sub">21 chapters</div>
+  <div class="sub">21 Comprehensive Subsystem Chapters</div>
   <div class="meta">Generated 2026-08-19 · learn-with-ai</div>
 </div>
 <nav class="toc"><h2>Contents</h2><ol id="toc"></ol></nav>
