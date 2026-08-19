@@ -62,15 +62,15 @@ sequenceDiagram
     participant BPM as BufferPoolManager
     participant Idx as BTreeIndex
 
-    CLI->>Eng: execute("INSERT INTO items VALUES (100, 10);")
-    Eng->>TM: begin_transaction() -> TxID: 1
-    Eng->>Heap: insert(Item {100, $10}, xmin=1)
+    CLI->>Eng: execute SQL insert item 100, price 10
+    Eng->>TM: begin_transaction() -> TxID 1
+    Eng->>Heap: insert item (id 100, price 10, xmin 1)
     Heap->>BPM: fetch_page(0)
     Heap->>Heap: insert_tuple() -> Landed at CTID (0, 1)
     Heap->>BPM: unpin_page(0, is_dirty=true)
-    Eng->>WAL: log_insert(tx_id=1, ctid=(0, 1), Item {100, 10})
-    Eng->>Idx: insert_entry(key=100, ctid=(0, 1))
-    Eng->>WAL: log_commit(tx_id=1) -> Flushes WAL to disk
-    Eng->>TM: commit(tx_id=1)
-    Eng-->>CLI: "[Tx 1] INSERT: Landed at CTID (0, 1)... Transaction committed."
+    Eng->>WAL: log_insert(tx 1, ctid 0:1, item 100)
+    Eng->>Idx: insert_entry(key 100, ctid 0:1)
+    Eng->>WAL: log_commit(tx 1) -> Flushes WAL to disk
+    Eng->>TM: commit(tx 1)
+    Eng-->>CLI: Insert successful at CTID (0, 1) and committed
 ```

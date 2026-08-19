@@ -53,7 +53,7 @@ sequenceDiagram
 
     loop For each candidate CTID
         SQL->>Heap: get(CTID)
-        Heap-->>SQL: HeapTuple {header, data}
+        Heap-->>SQL: HeapTuple (header, data)
         SQL->>MVCC: is_visible(tuple.header, snapshot)
         alt Visible
             MVCC-->>SQL: true (Return tuple to client)

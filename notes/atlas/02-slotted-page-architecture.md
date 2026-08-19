@@ -46,16 +46,16 @@ The **Slotted Page** architecture solves variable-length record management and i
 
 ---
 
-## 3. Tuple Insertion State Machine
+## 3. Tuple Insertion Algorithm
 
 ```mermaid
-stateDiagram-v2
-    [*] --> CheckSpace: insert_tuple(data, len)
-    CheckSpace --> Reject: (len + 4) > (pd_upper - pd_lower)
-    CheckSpace --> Allocate: (len + 4) <= (pd_upper - pd_lower)
-    Allocate --> DecrementUpper: pd_upper = pd_upper - len
-    DecrementUpper --> CopyData: memcpy(page_buf + pd_upper, data, len)
-    CopyData --> IncrementLower: slot_id = (pd_lower - 18)/4 + 1\npd_lower = pd_lower + 4
-    IncrementLower --> WriteLinePointer: line_pointer[slot] = {offset: pd_upper, flags: NORMAL, len: len}
-    WriteLinePointer --> [*]: Return slot_id
+flowchart TD
+    START([insert_tuple data, len]) --> CHECK{len + 4 <= pd_upper - pd_lower}
+    CHECK -->|No| REJECT[Reject: Page Full]
+    CHECK -->|Yes| DEC[pd_upper = pd_upper - len]
+    DEC --> COPY[Copy payload into page at pd_upper]
+    COPY --> INC[Compute slot_id = pd_lower - 18 / 4 + 1<br/>Advance pd_lower = pd_lower + 4]
+    INC --> PTR[Write LinePointer for slot_id<br/>offset = pd_upper, flags = NORMAL, len = len]
+    PTR --> DONE([Return slot_id])
 ```
+

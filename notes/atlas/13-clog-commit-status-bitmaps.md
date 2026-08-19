@@ -11,17 +11,17 @@ PostgreSQL avoids in-place tuple updates upon transaction commit by persisting t
 
 Each transaction is encoded using exactly **2 bits**:
 
-$$\text{00} = \text{IN\_PROGRESS} \qquad \text{01} = \text{COMMITTED} \qquad \text{10} = \text{ABORTED} \qquad \text{11} = \text{SUB\_COMMITTED}$$
+$$\text{00} = \text{IN-PROGRESS} \qquad \text{01} = \text{COMMITTED} \qquad \text{10} = \text{ABORTED} \qquad \text{11} = \text{SUB-COMMITTED}$$
 
 ```mermaid
 flowchart TD
     subgraph CLOGBitPacking["8KB CLOG Page (32,768 Transactions)"]
-        BYTE0["Byte 0: [Tx3 (bits 7-6) | Tx2 (bits 5-4) | Tx1 (bits 3-2) | Tx0 (bits 1-0)]"]
-        BYTE1["Byte 1: [Tx7 (bits 7-6) | Tx6 (bits 5-4) | Tx5 (bits 3-2) | Tx4 (bits 1-0)]"]
-        BYTEN["Byte 8191: [Tx32767 .. Tx32764]"]
+        BYTE0["Byte 0: Tx3 | Tx2 | Tx1 | Tx0"]
+        BYTE1["Byte 1: Tx7 | Tx6 | Tx5 | Tx4"]
+        BYTEN["Byte 8191: Tx32767 .. Tx32764"]
     end
 
-    XID["Transaction ID: 5"] --> CALC["Page: 5 / 32768 = 0\nByte: (5 % 32768) / 4 = 1\nShift: (5 % 4) * 2 = 2 bits"]
+    XID["Transaction ID: 5"] --> CALC["Page: 5 / 32768 = 0<br/>Byte: (5 % 32768) / 4 = 1<br/>Shift: (5 % 4) * 2 = 2 bits"]
     CALC --> BYTE1
 ```
 
@@ -30,11 +30,11 @@ flowchart TD
 ## 2. Invariants & Mathematical Mapping Formulas
 
 1. **Transaction Density Derivation**:
-   $$\text{Transactions Per Page} = 8192 \text{ bytes} \times 4 \text{ tx/byte} = 32,768 \text{ transactions}$$
+   $$\text{Transactions Per Page} = 8192 \text{ bytes} \times 4 \text{ tx/byte} = 32768 \text{ transactions}$$
 2. **Exact Bit Offset Formula**:
-   $$\text{clog\_page\_id} = \lfloor \text{tx\_id} / 32768 \rfloor$$
-   $$\text{byte\_offset} = \lfloor (\text{tx\_id} \pmod{32768}) / 4 \rfloor$$
-   $$\text{bit\_shift} = (\text{tx\_id} \pmod 4) \times 2$$
+   $$\text{clog\_page} = \lfloor \text{tx\_id} / 32768 \rfloor$$
+   $$\text{byte\_offset} = \lfloor (\text{tx\_id} \bmod 32768) / 4 \rfloor$$
+   $$\text{bit\_shift} = (\text{tx\_id} \bmod 4) \times 2$$
 3. **Instant Visibility on Restart**: CLOG pages are flushed on commit and loaded on startup, enabling instantaneous MVCC snapshot visibility checks without requiring full WAL log replay (`[src/clog.cpp:45]`).
 
 ---

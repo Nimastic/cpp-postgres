@@ -57,10 +57,10 @@ sequenceDiagram
     Client->>Engine: SELECT doc FROM items WHERE item_id = 500;
     Engine->>Index: find_entries(500) -> CTID (0, 2)
     Engine->>Heap: get((0, 2)) -> HeapTuple
-    Note over Engine: Check tuple.header.infomask & HEAP_HASEXTERNAL
+    Note over Engine: Check tuple.header.infomask and HEAP_HASEXTERNAL
     alt HEAP_HASEXTERNAL is TRUE
         Engine->>Toast: fetch_toast_payload(pointer.toast_id, pointer.raw_size)
-        Toast-->>Engine: Reassembled 10,000-byte document text
+        Toast-->>Engine: Reassembled 10000-byte document text
     else HEAP_HASEXTERNAL is FALSE
         Engine->>Engine: Read inline string
     end

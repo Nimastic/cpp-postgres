@@ -13,12 +13,12 @@
 flowchart TD
     subgraph RootNode["Root Internal Page (Page 0)"]
         R_HDR["Header: is_leaf=false, num_keys=1"]
-        R_E1["Key < 500 -> Page 1 | Key >= 500 -> Page 2"]
+        R_E1["Key under 500 -> Page 1 | Key 500 and above -> Page 2"]
     end
 
     subgraph LeafLevel["Leaf Level (Linked via right_sibling)"]
-        L1["Leaf Page 1\nKeys: [100..400]\nright_sibling -> Page 2"]
-        L2["Leaf Page 2\nKeys: [500..900]\nright_sibling -> 0 (Tail)"]
+        L1["Leaf Page 1\nKeys: 100 to 400\nright_sibling -> Page 2"]
+        L2["Leaf Page 2\nKeys: 500 to 900\nright_sibling -> 0 (Tail)"]
     end
 
     R_E1 --> L1

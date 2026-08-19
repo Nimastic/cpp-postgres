@@ -45,13 +45,13 @@ flowchart TD
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Unloaded: Page on Disk
-    Unloaded --> PinnedClean: fetch_page(page_id) (Read from Disk)
-    PinnedClean --> PinnedDirty: In-Memory Modification (Insert/Update)
-    PinnedClean --> UnpinnedClean: unpin_page(page_id, is_dirty=false)
-    PinnedDirty --> UnpinnedDirty: unpin_page(page_id, is_dirty=true)
-    UnpinnedClean --> PinnedClean: fetch_page(page_id) (RAM Cache Hit)
-    UnpinnedDirty --> PinnedDirty: fetch_page(page_id) (RAM Cache Hit)
-    UnpinnedDirty --> UnpinnedClean: Eviction / Flush (Write to Disk)
-    UnpinnedClean --> Unloaded: Frame Evicted by Clock-Sweep
+    [*] --> Unloaded
+    Unloaded --> PinnedClean: fetch_page read disk
+    PinnedClean --> PinnedDirty: memory write
+    PinnedClean --> UnpinnedClean: unpin clean
+    PinnedDirty --> UnpinnedDirty: unpin dirty
+    UnpinnedClean --> PinnedClean: fetch_page cache hit
+    UnpinnedDirty --> PinnedDirty: fetch_page cache hit
+    UnpinnedDirty --> UnpinnedClean: flush to disk
+    UnpinnedClean --> Unloaded: clock_sweep eviction
 ```

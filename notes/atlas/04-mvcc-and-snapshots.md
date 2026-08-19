@@ -51,7 +51,7 @@ sequenceDiagram
 
     Tx1->>TM: begin_transaction() -> TxID: 10
     Tx2->>TM: begin_transaction() -> TxID: 11
-    Tx2->>TM: take_snapshot(11) -> {xmin: 10, xmax: 12, active: [10]}
+    Tx2->>TM: take_snapshot(11) -> Snapshot (xmin 10, xmax 12, active: 10)
 
     Tx1->>Heap: insert(Item 100, xmin=10) -> Stored at (0, 1)
     Tx2->>Heap: seq_scan(snapshot_11)
@@ -62,8 +62,8 @@ sequenceDiagram
     Note over Tx1,TM: Tx 1 marked COMMITTED in CLOG.
 
     participant Tx3 as Tx 3 (New Reader)
-    Tx3->>TM: take_snapshot(12) -> {xmin: 12, xmax: 13, active: []}
+    Tx3->>TM: take_snapshot(12) -> Snapshot (xmin 12, xmax 13, active: none)
     Tx3->>Heap: seq_scan(snapshot_12)
-    Note over Tx3,Heap: Reads (0, 1) [xmin=10].<br/>10 < xmin (12) & COMMITTED -> VISIBLE!
+    Note over Tx3,Heap: Reads (0, 1) [xmin=10].<br/>10 < xmin (12) and COMMITTED -> VISIBLE!
     Heap-->>Tx3: 1 row returned (Item 100)
 ```

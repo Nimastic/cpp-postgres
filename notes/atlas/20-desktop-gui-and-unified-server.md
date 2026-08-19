@@ -42,12 +42,12 @@ flowchart TD
 │ [COMMIT]   [ROLLBACK]   │ ┌────────┬────────┬────────┬───────────────────────────────┐ │
 │ [STATUS]   [VACUUM]     │ │ Slot # │ Offset │ Length │ Live Tuple Details            │ │
 │                         │ ├────────┼────────┼────────┼───────────────────────────────┤ │
-│ 📋 LIVE TABLE VIEW      │ │ Slot 1 │ 8168   │ 24 B   │ [LIVE] id=100, price=$10      │ │
+│ 📋 LIVE TABLE VIEW      │ │ Slot 1 │ 8168   │ 24 B   │ [LIVE] id=100, price=10       │ │
 │ ┌─────┬───────┬────┬───┐│ │ Slot 2 │ 8144   │ 24 B   │ [HOT REDIRECT] -> (0, 3)      │ │
-│ │ id  │ price │xmin│CTI││ │ Slot 3 │ 8120   │ 24 B   │ [HEAP-ONLY TUPLE] id=100, $20 │ │
+│ │ id  │ price │xmin│CTI││ │ Slot 3 │ 8120   │ 24 B   │ [HEAP-ONLY TUPLE] id=100, 20  │ │
 │ ├─────┼───────┼────┼───┤│ └────────┴────────┴────────┴───────────────────────────────┘ │
-│ │ 100 │ $20   │ 4  │0,3││                                                             │
-│ │ 200 │ $5    │ 2  │0,2││ 🧠 Shared Buffers Tab: Live Clock-Sweep & Pin Tracking       │
+│ │ 100 │ 20    │ 4  │0,3││                                                             │
+│ │ 200 │ 5     │ 2  │0,2││ 🧠 Shared Buffers Tab: Live Clock-Sweep & Pin Tracking       │
 │ └─────┴───────┴────┴───┘│ 🌲 Disk B-Tree Tab: Key -> Candidate CTID Mapping           │
 │                         │ 🚦 CLOG Tab: 2-bit Transaction Status Bitmaps               │
 │ 📊 OUTPUT LOG CONSOLE   │ 📜 WAL Tab: ARIES Crash Recovery & Checkpoint Stream         │
@@ -64,29 +64,29 @@ sequenceDiagram
     autonumber
     participant Main as Server Main (src/server_main.cpp)
     participant Engine as Shared pg::Engine
-    participant HTTP as HttpServer (:8080)
-    participant PGW as PgWireServer (:5432)
+    participant HTTP as HttpServer (Port 8080)
+    participant PGW as PgWireServer (Port 5432)
     participant React as React Browser
     participant PSQL as psql CLI
 
-    Main->>Engine: Initialize Database ("pg_server_data")
-    Main->>HTTP: start_async() (Spawns HTTP Worker Thread)
-    Main->>PGW: start_async() (Spawns pgwire Worker Thread)
+    Main->>Engine: Initialize Database
+    Main->>HTTP: start_async (Spawns HTTP Worker Thread)
+    Main->>PGW: start_async (Spawns pgwire Worker Thread)
     
     par Concurrent Client Queries
-        React->>HTTP: POST /api/sql { "sql": "INSERT INTO items..." }
-        HTTP->>Engine: lock(mutex) -> execute()
+        React->>HTTP: POST /api/sql (insert item)
+        HTTP->>Engine: lock mutex and execute
         Engine-->>HTTP: JSON output
         HTTP-->>React: HTTP 200 OK
     and
-        PSQL->>PGW: Simple Query ('Q', "SELECT * FROM items;")
-        PGW->>Engine: lock(mutex) -> seq_scan()
+        PSQL->>PGW: Simple Query Q (select items)
+        PGW->>Engine: lock mutex and seq_scan
         Engine-->>PGW: Tuples
-        PGW-->>PSQL: RowDescription ('T') + DataRow ('D')
+        PGW-->>PSQL: RowDescription T and DataRow D
     end
 
-    Note over Main: User types 'quit' or sends SIGINT
-    Main->>HTTP: stop() (Closes socket)
-    Main->>PGW: stop() (Closes socket)
-    Main-->>Main: Database cleanly persisted to disk!
+    Note over Main: User types quit or sends SIGINT
+    Main->>HTTP: stop (Closes socket)
+    Main->>PGW: stop (Closes socket)
+    Main-->>Main: Database cleanly persisted to disk
 ```

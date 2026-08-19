@@ -14,7 +14,7 @@ When an attribute payload exceeds **2,048 bytes (2KB)**, the storage engine slic
 ```mermaid
 flowchart LR
     subgraph MainHeap["Main Heap Page (8KB)"]
-        TUPLE["Heap Tuple\n[item_id: 100, price: $10]\n[ToastPointer: 18 Bytes]"]
+        TUPLE["Heap Tuple\n[item_id: 100, price: 10]\n[ToastPointer: 18 Bytes]"]
     end
 
     subgraph ToastRelation["Auxiliary TOAST Relation (*_toast.db)"]
@@ -23,7 +23,7 @@ flowchart LR
         C2["Chunk 2 (seq=2, 1800 B)\n[toast_id=1]"]
     end
 
-    TUPLE -.->|ToastPointer {id: 1, size: 5896, chunks: 3}| C0
+    TUPLE -.->|ToastPointer id 1, size 5896, 3 chunks| C0
     C0 --- C1 --- C2
 ```
 

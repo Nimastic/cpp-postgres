@@ -21,7 +21,7 @@ flowchart LR
 
     subgraph Page0["Same 8KB Slotted Page (Page 0)"]
         LP1["Slot 1 Line Pointer\nFlags: NORMAL"] --> T1["Tuple (0, 1)\n[infomask: HEAP_HOT_UPDATED]\n[t_ctid -> (0, 2)]"]
-        LP2["Slot 2 Line Pointer\nFlags: NORMAL"] --> T2["Tuple (0, 2)\n[infomask: HEAP_ONLY_TUPLE]\n[price: $20, t_ctid -> (0, 2)]"]
+        LP2["Slot 2 Line Pointer\nFlags: NORMAL"] --> T2["Tuple (0, 2)\n[infomask: HEAP_ONLY_TUPLE]\n[price: 20, t_ctid -> (0, 2)]"]
     end
 
     IDX --> LP1
@@ -52,6 +52,6 @@ sequenceDiagram
     Page-->>Client: Tuple 1 [xmin=1, xmax=2, flags: HEAP_HOT_UPDATED, t_ctid: (0, 2)]
     Note over Client: Tuple 1 is DEAD under current snapshot.<br/>Has HEAP_HOT_UPDATED -> Follow t_ctid!
     Client->>Page: fetch_tuple((0, 2))
-    Page-->>Client: Tuple 2 [xmin=2, xmax=0, flags: HEAP_ONLY_TUPLE, price: $20]
-    Note over Client: Tuple 2 is LIVE -> Return price $20!
+    Page-->>Client: Tuple 2 [xmin=2, xmax=0, flags: HEAP_ONLY_TUPLE, price: 20]
+    Note over Client: Tuple 2 is LIVE -> Return price 20!
 ```

@@ -70,10 +70,10 @@ sequenceDiagram
     HTTP-->>React: HTTP 204 No Content (Access-Control-Allow-Origin: *)
 
     Note over React,HTTP: SQL Execution Request
-    React->>HTTP: POST /api/sql (Body: "INSERT INTO items VALUES (100, 10);")
+    React->>HTTP: POST /api/sql (INSERT item 100, price 10)
     HTTP->>HTTP: Parse HTTP Request Line & Content-Length
     HTTP->>Engine: lock(engine_mutex_) -> execute(sql)
     Engine-->>HTTP: Output string
     HTTP->>HTTP: Format JSON response
-    HTTP-->>React: HTTP 200 OK { "success": true, "output": "..." }
+    HTTP-->>React: HTTP 200 OK (JSON success and output)
 ```

@@ -9,7 +9,7 @@
 
 When rows are updated or deleted under MVCC, old tuple versions become **dead** once their `xmax` falls below the oldest active transaction in the entire cluster:
 
-$$\text{Dead Condition: } \text{xmax} > 0 \ \land \ \text{status}(\text{xmax}) == \text{COMMITTED} \ \land \ \text{xmax} < \text{oldest\_active\_xmin}$$
+$$\text{Dead Condition: } (\text{xmax} > 0) \ \land \ (\text{status}(\text{xmax}) = \text{COMMITTED}) \ \land \ (\text{xmax} < \text{oldest\_active\_xmin})$$
 
 ```mermaid
 flowchart TD
@@ -55,5 +55,5 @@ sequenceDiagram
         Vac->>Page: compact_and_defragment()
         Vac->>Heap: write_page(page_id, page_buf)
     end
-    Vac-->>Admin: VacuumResult {reclaimed_tuples, reclaimed_bytes, pages_vacuumed}
+    Vac-->>Admin: VacuumResult (reclaimed_tuples, reclaimed_bytes, pages_vacuumed)
 ```

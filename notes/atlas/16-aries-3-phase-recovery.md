@@ -47,11 +47,11 @@ sequenceDiagram
 
     Note over System,CLOG: Phase 2: REDO Pass (Repeating History)
     System->>WAL: Replay Tx 1 Insert -> Applied to Page 0
-    System->>WAL: Replay Tx 2 Update -> Applied to Page 0 (Price $999)
+    System->>WAL: Replay Tx 2 Update -> Applied to Page 0 (Price 999)
 
     Note over System,CLOG: Phase 3: UNDO Pass (Rolling Back Losers)
     System->>WAL: Scan backward for Tx 2 actions
-    System->>Heap: Rollback Update -> Restore Slot 1 price ($10) & xmax=0
+    System->>Heap: Rollback Update -> Restore Slot 1 price 10 and xmax=0
     System->>WAL: log_clr(tx_id=2, undone_lsn)
     System->>CLOG: set_status(tx_id=2, ABORTED)
     Note over System,CLOG: Database fully consistent!
