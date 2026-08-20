@@ -36,9 +36,9 @@ flowchart TD
    - `right_sibling` (4 Bytes): `page_id_t` linking to the right sibling page for fast linear range scans.
    - `parent_page_id` (4 Bytes): `page_id_t` of the parent router node.
 2. **Entry Binary Layouts**:
-   - **Leaf Entry (10 Bytes)**: `key` (4B int32) + `ctid` (4B CTID `{page, slot}`) + `flags` (2B).
-   - **Internal Router Entry (8 Bytes)**: `key` (4B int32) + `child_page_id` (4B `page_id_t`).
-3. **Median Split Algorithm**: When a leaf exceeds capacity ($N \ge 800$), the median entry at $N/2$ is promoted to the parent node, splitting the keys evenly into a newly allocated 8KB sibling page (`[src/disk_btree.cpp:125]`).
+   - **Leaf Entry (10 Bytes)** (`[include/pg/disk_btree.h:39-42]`): `key` (4B int32) + `ctid` (6B CTID `{page, slot}`).
+   - **Internal Router Entry (8 Bytes)** (`[include/pg/disk_btree.h:44-48]`): `key` (4B int32) + `child_page_id` (4B `page_id_t`).
+3. **Median Split Algorithm**: When a leaf exceeds capacity ($N \ge 64$, `BTREE_MAX_LEAF_KEYS`), the median entry at $N/2$ is promoted to the parent node, splitting the keys evenly into a newly allocated 8KB sibling page (`[src/disk_btree.cpp:125]`).
 
 ---
 
@@ -55,10 +55,10 @@ sequenceDiagram
 
     Client->>Tree: insert_entry(key=550, ctid=(0, 20))
     Tree->>Tree: Traverse to target Leaf Page 0
-    Tree->>P0: check num_keys >= MAX_KEYS (800)
+    Tree->>P0: check num_keys >= MAX_KEYS (64)
     Note over Tree,P1: Node Overflow! Trigger Split Pass.
     Tree->>BPM: allocate_new_page() -> Page 1
-    Tree->>P0: Copy upper 400 keys to Page 1
+    Tree->>P0: Copy upper 32 keys to Page 1
     Tree->>P0: Set right_sibling = Page 1
     Tree->>P1: Set right_sibling = old_sibling
     Tree->>Tree: Insert median key (500) into Root Parent Page

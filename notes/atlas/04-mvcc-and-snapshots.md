@@ -30,12 +30,14 @@ A tuple version is visible to a `Snapshot` if and only if **both** of the follow
 1. **Creation Visibility (`xmin`)**:
    - `xmin == snapshot.current_tx_id` (created by current tx), OR
    - (`xmin < snapshot.xmax` AND `xmin` is NOT in `snapshot.active_txs` AND `status(xmin) == COMMITTED`).
-2. **Deletion Invisibility (`xmax`)**:
-   - `xmax == 0` (never deleted/updated), OR
-   - `xmax == snapshot.current_tx_id` AND NOT yet committed, OR
-   - `xmax >= snapshot.xmax` (deleted in future), OR
-   - `xmax` IS in `snapshot.active_txs` (deleted by active concurrent tx), OR
-   - `status(xmax) == ABORTED` (deletion was rolled back).
+2. **Deletion Invisibility / Retention (`xmax`)**:
+   A tuple remains visible regarding its deletion state if:
+   - `xmax == 0` (never deleted or updated), OR
+   - `status(xmax) == ABORTED` (deleter transaction rolled back), OR
+   - `status(xmax) == IN_PROGRESS` (deleter transaction is still running concurrently), OR
+   - `xmax >= snapshot.xmax` (deleted in the future after this snapshot was taken), OR
+   - `xmax` IS in `snapshot.active_txs` (deleter was in-flight when snapshot started).
+   *(Note: If `xmax == snapshot.current_tx_id`, the deletion was executed by the current transaction itself, making the tuple invisible).*
 
 ---
 

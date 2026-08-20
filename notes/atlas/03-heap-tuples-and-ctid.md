@@ -31,16 +31,14 @@ flowchart TD
 
 ## 2. Invariants & Binary Layout
 
-1. **TupleHeader Structure (18 Bytes)** (`[include/pg/tuple.h:18]`):
+1. **TupleHeader Structure (16 Bytes)** (`[include/pg/tuple.h:42-47]`):
    - `xmin` (4 Bytes): Transaction ID that inserted this row version.
    - `xmax` (4 Bytes): Transaction ID that deleted or updated this row version (`0` if currently live).
-   - `t_cid` (2 Bytes): Command ID within the transaction.
-   - `t_ctid` (4 Bytes): Forward pointer to the newest row version (or self-reference `(page, slot)` if newest).
-   - `infomask2` (2 Bytes): Attribute count and HOT flags (`HEAP_KEYS_UPDATED = 0x2000`, `HEAP_HOT_UPDATED = 0x4000`, `HEAP_ONLY_TUPLE = 0x8000`).
-   - `infomask` (2 Bytes): Status flags (`HEAP_HASNULL = 0x0001`, `HEAP_HASEXTERNAL = 0x2000`, `HEAP_XMIN_COMMITTED = 0x0100`).
+   - `t_ctid` (6 Bytes): Forward pointer `CTID {page, slot}` to the newest row version (or self-reference `(page, slot)` if newest).
+   - `infomask` (2 Bytes): Status flags (`HEAP_HASEXTERNAL = 0x2000`, `HEAP_HOT_UPDATED = 0x4000`, `HEAP_ONLY_TUPLE = 0x8000`).
 
 2. **Physical Tuple Capacity Derivation**:
-   For an 8KB page with 18-byte page header and 24-byte serialized heap tuples (18B header + 6B data `item_id + price`), the maximum row capacity per page is:
+   For an 8KB page with 18-byte page header and 24-byte serialized heap tuples (16B header + 8B data `item_id + price`), the maximum row capacity per page is:
    $$\text{Max Tuples Per Page} = \left\lfloor \frac{8192 - 18}{24 + 4} \right\rfloor = \left\lfloor \frac{8174}{28} \right\rfloor = 291 \text{ tuples}$$
 
 ---

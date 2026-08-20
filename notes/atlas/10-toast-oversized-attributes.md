@@ -31,14 +31,13 @@ flowchart LR
 
 ## 2. Invariants & Binary Layout
 
-1. **ToastPointer Structure (18 Bytes)** (`[include/pg/toast.h:18]`):
-   - `toast_id` (8 Bytes): Unique 64-bit identifier linking to the auxiliary relation.
-   - `raw_size` (4 Bytes): Original uncompressed byte size of the attribute.
-   - `chunk_count` (2 Bytes): Total number of auxiliary chunks ($\lceil \text{raw\_size} / 2048 \rceil$).
-   - `ext_flags` (4 Bytes): Compression and storage strategy flags.
-2. **ToastChunk Structure (2,066 Bytes per chunk)**:
-   - `toast_id` (8 Bytes), `chunk_seq` (4 Bytes), `chunk_size` (2 Bytes).
-   - `chunk_data` (2,048 Bytes).
+1. **ToastPointer Structure (18 Bytes)** (`[include/pg/toast.h:28-36]`):
+   - `toast_id` (8 Bytes): Unique 64-bit identifier linking to the auxiliary relation (`uint64_t`).
+   - `raw_size` (4 Bytes): Original uncompressed byte size of the attribute (`uint32_t`).
+   - `chunk_count` (4 Bytes): Total number of auxiliary chunks ($\lceil \text{raw\_size} / 2048 \rceil$, `uint32_t`).
+   - `flags` (2 Bytes): Compression and storage strategy flags (`uint16_t`).
+2. **ToastChunk Structure** (`[include/pg/toast.h:39-43]`):
+   - `toast_id` (8 Bytes), `chunk_seq` (4 Bytes), `data` (`std::vector<uint8_t>`, storing up to 2,048-byte chunks).
 3. **Sequential Scan Preservation**: Sequential scans over normal columns (e.g. `SELECT price FROM items;`) never read or load TOAST pages into shared buffers, avoiding massive I/O pollution (`[src/toast.cpp:65]`).
 
 ---

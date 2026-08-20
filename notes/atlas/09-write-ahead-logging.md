@@ -30,14 +30,14 @@ flowchart LR
 1. **The WAL Invariant**:
    $$\text{page.pd\_lsn} \le \text{wal.flushed\_lsn}$$
    A dirty page in RAM is never written to disk before all WAL records up to the page's `pd_lsn` have been flushed to disk (`[src/wal.cpp:110]`).
-2. **Log Record Structure (Header + Payload + CRC32)**:
+2. **Log Record Structure (35-Byte Header + Dynamic Payload)** (`[include/pg/wal.h:35-47]`):
    - `lsn` (8 Bytes): Monotonically increasing Log Sequence Number.
    - `prev_lsn` (8 Bytes): Backward pointer for UNDO / transaction rollback chains.
    - `tx_id` (4 Bytes): Transaction ID.
    - `type` (1 Byte): `1`=INSERT, `2`=UPDATE, `3`=COMMIT, `4`=ABORT, `5`=CHECKPOINT, `6`=FPI, `7`=CLR.
-   - `page_id` (4 Bytes), `slot_id` (2 Bytes).
-   - `payload_len` (2 Bytes) + `payload` data.
-   - `crc32` (4 Bytes): IEEE 802.3 polynomial checksum verifying data integrity against partial writes and disk corruptions.
+   - `page_id` (4 Bytes), `slot_id` (2 Bytes): Target heap page and line pointer.
+   - `payload_len` (4 Bytes): Byte length of following payload (`uint32_t`).
+   - `crc` (4 Bytes): IEEE 802.3 polynomial CRC32 checksum verifying record integrity.
 
 ---
 

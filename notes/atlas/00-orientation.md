@@ -53,7 +53,7 @@ flowchart TD
 
 The entire storage engine enforces seven architectural invariants:
 
-1. **8KB Page Uniformity**: All disk structures (Heap, B-Tree, CLOG, TOAST) operate on fixed 8,192-byte page boundaries aligned to the OS block layer (`[include/pg/page.h:12]`).
+1. **8KB Page Uniformity**: All disk structures (Heap, B-Tree, CLOG, TOAST) operate on fixed 8,192-byte page boundaries aligned to the OS block layer (`[include/pg/constants.h:9]`).
 2. **Buffer Pool Single Gateway**: Application subsystems never execute direct file I/O; all page accesses pin frames inside `BufferPoolManager` (`[src/heap.cpp:45]`).
 3. **Write-Ahead Logging (WAL)**: A dirty page in RAM is never written to disk until its corresponding WAL log record has been flushed (`page.pd_lsn <= wal.flushed_lsn`) (`[src/wal.cpp:110]`).
 4. **Append-Only MVCC**: Updates never mutate live data in place; they stamp `xmax` on the old tuple version and append a new version with `xmin` (`[src/heap.cpp:88]`).

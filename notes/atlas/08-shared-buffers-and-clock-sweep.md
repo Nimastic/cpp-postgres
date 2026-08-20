@@ -7,7 +7,7 @@
 
 ## 1. Buffer Pool Manager (Shared Buffers) Architecture
 
-`BufferPoolManager` maintains a fixed pool of **16 in-memory frames** (each exactly 8,192 bytes) acting as an LRU-approximation cache between the execution engine and physical disk files.
+`BufferPoolManager` maintains a configurable pool of in-memory frames (defaulting to **16 frames**, each exactly 8,192 bytes) acting as an LRU-approximation cache between the execution engine and physical disk files.
 
 ```mermaid
 flowchart TD

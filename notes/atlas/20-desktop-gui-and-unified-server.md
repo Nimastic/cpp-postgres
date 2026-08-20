@@ -18,7 +18,7 @@ flowchart TD
         SRV["pg_server.exe (Unified Server Daemon)\n• Background Thread 1: HTTP :8080\n• Background Thread 2: pgwire :5432\n• Signal Handler & Console CLI"]
     end
 
-    subgraph CoreEngine["Shared Core Library (libpg_core.a)"]
+    subgraph CoreEngine["Shared Core Library (pg_core)"]
         ENG["pg::Engine (C++20)\nShared Buffers · Slotted Pages · ARIES WAL · CLOG · TOAST"]
     end
 

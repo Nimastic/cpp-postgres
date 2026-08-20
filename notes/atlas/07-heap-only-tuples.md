@@ -32,8 +32,8 @@ flowchart LR
 
 ## 2. Invariants & Infomask Flags
 
-1. **`HEAP_HOT_UPDATED` (`0x4000`)**: Stamped on the old tuple version's `infomask2`. Indicates that the next version in the update chain resides on this exact same page (`[include/pg/tuple.h:42]`).
-2. **`HEAP_ONLY_TUPLE` (`0x8000`)**: Stamped on the newly created tuple version's `infomask2`. Tells the engine that no index pointer references this tuple directly; it can only be reached by following the HOT chain starting at the root index pointer (`[include/pg/tuple.h:43]`).
+1. **`HEAP_HOT_UPDATED` (`0x4000`)**: Stamped on the old tuple version's `infomask`. Indicates that the next version in the update chain resides on this exact same page (`[include/pg/tuple.h:51]`).
+2. **`HEAP_ONLY_TUPLE` (`0x8000`)**: Stamped on the newly created tuple version's `infomask`. Tells the engine that no index pointer references this tuple directly; it can only be reached by following the HOT chain starting at the root index pointer (`[include/pg/tuple.h:52]`).
 3. **`ItemFlags::REDIRECT`**: When VACUUM or pruning removes the dead root tuple data, it changes Slot 1's line pointer into a redirect pointer (`lp_flags = REDIRECT, lp_offset = slot_2`), preserving index stability with zero tuple bytes.
 
 ---

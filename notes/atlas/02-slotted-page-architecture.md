@@ -26,19 +26,19 @@ The **Slotted Page** architecture solves variable-length record management and i
 
 ## 2. Invariants & Mathematical Formulas
 
-1. **Page Header Structure (18 Bytes)**:
-   - `pd_lsn` (8 Bytes): LSN of the last WAL record that modified this page (`[include/pg/page.h:20]`).
+1. **Page Header Structure (18 Bytes)** (`[include/pg/page.h:41-48]`):
+   - `pd_lsn` (8 Bytes): LSN of the last WAL record that modified this page (`[include/pg/page.h:42]`).
+   - `pd_checksum` (2 Bytes): Page checksum (`[include/pg/page.h:43]`).
    - `pd_flags` (2 Bytes): Page status flags (e.g. `PD_ALL_VISIBLE = 0x0004`).
    - `pd_lower` (2 Bytes): Byte offset marking the end of the line pointers array (initially 18).
    - `pd_upper` (2 Bytes): Byte offset marking the start of the youngest tuple data (initially 8192).
    - `pd_special` (2 Bytes): Reserved for index-specific metadata (8192 for heap pages).
-   - `pd_prune_xid` (2 Bytes): Oldest unpruned XID.
 
-2. **Line Pointer Bitfield Packing (4 Bytes)**:
-   $$\text{Line Pointer (uint32\_t)} = (\text{offset} \ \& \ \text{0x7FFF}) \ | \ ((\text{flags} \ \& \ \text{0x03}) \ll 15) \ | \ ((\text{length} \ \& \ \text{0x7FFF}) \ll 17)$$
-   - `lp_offset` (15 bits): Byte offset to tuple data.
-   - `lp_flags` (2 bits): `00` = `UNUSED`, `01` = `NORMAL` (Live), `10` = `REDIRECT` (HOT chain), `11` = `DEAD`.
-   - `lp_len` (15 bits): Byte length of tuple.
+2. **Line Pointer Layout (4 Bytes)** (`[include/pg/page.h:22-38]`):
+   - `lp_offset` (uint16_t, 16 bits): Byte offset from start of page where tuple data begins.
+   - `lp_len_flags` (uint16_t, 16 bits):
+     - Lower 14 bits (`0x3FFF`): Byte length of tuple.
+     - Upper 2 bits (`>> 14`): `ItemFlags` (`00` = `UNUSED`, `01` = `NORMAL` (Live), `10` = `REDIRECT` (HOT chain), `11` = `DEAD`).
 
 3. **Free Space Allocation Formula**:
    $$\text{Free Space Available} = \text{pd\_upper} - \text{pd\_lower} - 4$$
