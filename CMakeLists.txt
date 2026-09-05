@@ -131,6 +131,11 @@ target_link_libraries(test_fsm PRIVATE pg_core)
 add_executable(test_executor tests/test_executor.cpp)
 target_link_libraries(test_executor PRIVATE pg_core)
 
+# Item 24 test executable (Relational Joins: Nested-Loop & Hash Join)
+add_executable(test_joins tests/test_joins.cpp)
+target_link_libraries(test_joins PRIVATE pg_core)
+
+
 # -----------------------------------------------------------------------------
 # PostgreSQL Native Desktop GUI Explorer (Dear ImGui + DirectX 11)
 # -----------------------------------------------------------------------------

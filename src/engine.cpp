@@ -23,6 +23,13 @@ static std::string to_upper(const std::string& str) {
     return upper;
 }
 
+// Helper to convert to lowercase for case-insensitive matching
+static std::string to_lower(const std::string& str) {
+    std::string lower = str;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    return lower;
+}
+
 Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
     // The control file is read before anything else, because it is what says
     // whether the previous run shut down cleanly.
@@ -507,6 +514,30 @@ std::string Engine::format_table(const std::vector<std::pair<CTID, HeapTuple>>& 
     return oss.str();
 }
 
+std::string Engine::format_join_table(const std::vector<TupleTableSlot>& slots, const std::string& scan_method) {
+    std::ostringstream oss;
+    oss << "\n+-----------+---------+-----------+---------+--------+--------+\n";
+    oss << "| a.item_id | a.price | b.item_id | b.price | a.ctid | b.ctid |\n";
+    oss << "+-----------+---------+-----------+---------+--------+--------+\n";
+
+    if (slots.empty()) {
+        oss << "| (0 rows returned)                                           |\n";
+    } else {
+        for (const auto& slot : slots) {
+            oss << "| " << std::setw(9) << slot.tuple.data.item_id
+                << " | $" << std::setw(7) << slot.tuple.data.price
+                << " | " << std::setw(9) << slot.inner_tuple.data.item_id
+                << " | $" << std::setw(7) << slot.inner_tuple.data.price
+                << " | " << std::setw(6) << slot.ctid.to_string()
+                << " | " << std::setw(6) << slot.inner_ctid.to_string() << " |\n";
+        }
+    }
+    oss << "+-----------+---------+-----------+---------+--------+--------+\n";
+    oss << "(" << slots.size() << " " << (slots.size() == 1 ? "row" : "rows") 
+        << " returned via " << scan_method << ")\n";
+    return oss.str();
+}
+
 Session Engine::new_session() {
     Session s;
     s.id = next_session_id_++;
@@ -697,6 +728,69 @@ std::string Engine::execute(const std::string& sql) {
         return select_filtered(pred, desc, query_limit, query_offset);
     }
 
+    // SELECT * FROM items [a] [HASH] JOIN items [b] [ON a.(col) = b.(col)]
+    std::regex select_join_regex(
+        R"(^SELECT\s+\*\s+FROM\s+items(?:\s+a)?\s+(HASH\s+)?JOIN\s+items(?:\s+b)?(?:\s+ON\s+(?:a|items)\.(price|item_id)\s*=\s*(?:b|items)\.(price|item_id))?)",
+        std::regex::icase);
+    std::smatch select_join_match;
+    if (std::regex_search(base_sql, select_join_match, select_join_regex)) {
+        bool is_hash = select_join_match[1].matched;
+        bool has_on = select_join_match[2].matched && select_join_match[3].matched;
+        std::string col_a = has_on ? to_lower(select_join_match[2].str()) : "";
+        std::string col_b = has_on ? to_lower(select_join_match[3].str()) : "";
+
+        if (is_hash && !has_on) {
+            return "[ERROR] HASH JOIN requires an equi-join ON condition (e.g. ON a.price = b.price).\n";
+        }
+
+        ensure_transaction();
+        std::unique_ptr<PlanNode> outer = std::make_unique<SeqScanNode>(*heap_, *sess_->snapshot, tm_);
+        std::unique_ptr<PlanNode> inner = std::make_unique<SeqScanNode>(*heap_, *sess_->snapshot, tm_);
+        std::unique_ptr<PlanNode> plan;
+
+        if (is_hash) {
+            auto outer_key_fn = [col_a](const TupleTableSlot& s) -> int32_t {
+                return (col_a == "price") ? s.tuple.data.price : s.tuple.data.item_id;
+            };
+            auto inner_key_fn = [col_b](const TupleTableSlot& s) -> int32_t {
+                return (col_b == "price") ? s.tuple.data.price : s.tuple.data.item_id;
+            };
+            std::string desc = "(a." + col_a + " = b." + col_b + ")";
+            plan = std::make_unique<HashJoinNode>(std::move(outer), std::move(inner),
+                                                  outer_key_fn, inner_key_fn, desc);
+        } else {
+            NestedLoopJoinNode::JoinPredicate pred = nullptr;
+            std::string desc = "cross-join";
+            if (has_on) {
+                pred = [col_a, col_b](const TupleTableSlot& out, const TupleTableSlot& in) -> bool {
+                    int32_t val_a = (col_a == "price") ? out.tuple.data.price : out.tuple.data.item_id;
+                    int32_t val_b = (col_b == "price") ? in.tuple.data.price : in.tuple.data.item_id;
+                    return val_a == val_b;
+                };
+                desc = "(a." + col_a + " = b." + col_b + ")";
+            }
+            plan = std::make_unique<NestedLoopJoinNode>(std::move(outer), std::move(inner), pred, desc);
+        }
+
+        if (query_limit > 0 || query_offset > 0) {
+            plan = std::make_unique<LimitNode>(std::move(plan),
+                                               query_limit > 0 ? query_limit : std::numeric_limits<size_t>::max(),
+                                               query_offset);
+        }
+
+        if (is_explain) {
+            return ExecutionEngine::explain(*plan, is_analyze);
+        }
+
+        bool autocommit = !sess_->current_tx.has_value();
+        if (autocommit) begin_transaction();
+        auto slots = ExecutionEngine::execute_slots(*plan);
+        std::string method = is_hash ? "Hash Join Scan" : "Nested Loop Join Scan";
+        std::string table = format_join_table(slots, method);
+        if (autocommit) commit_transaction();
+        return table;
+    }
+
     // SELECT * FROM items [LIMIT N] [OFFSET M]
     std::regex select_all_regex(R"(^SELECT\s+\*\s+FROM\s+items)", std::regex::icase);
     if (std::regex_search(base_sql, select_all_regex)) {
@@ -725,6 +819,7 @@ std::string Engine::execute(const std::string& sql) {
         oss << "  SELECT * FROM items [LIMIT N] [OFFSET M];       - Volcano streaming sequential scan\n";
         oss << "  SELECT * FROM items WHERE item_id = 100;       - B-Tree index point query\n";
         oss << "  SELECT * FROM items WHERE price > 50 [LIMIT N];- Filtered streaming scan\n";
+        oss << "  SELECT * FROM items a [HASH] JOIN items b ON a.price = b.price; - Relational join\n";
         oss << "  EXPLAIN [ANALYZE] SELECT ...;                  - Query execution plan tree\n";
         oss << "  VACUUM;                                        - Reclaim dead tuples & defragment\n";
         oss << "  DUMP PAGE 0;                                   - Slotted page physical layout dump\n";

@@ -258,6 +258,196 @@ std::string LimitNode::explain(int indent) const {
 }
 
 // =============================================================================
+// NestedLoopJoinNode Implementation
+// =============================================================================
+
+NestedLoopJoinNode::NestedLoopJoinNode(std::unique_ptr<PlanNode> outer,
+                                       std::unique_ptr<PlanNode> inner,
+                                       JoinPredicate predicate,
+                                       std::string predicate_desc)
+    : outer_(std::move(outer)), inner_(std::move(inner)),
+      predicate_(std::move(predicate)), predicate_desc_(std::move(predicate_desc)) {}
+
+void NestedLoopJoinNode::init() {
+    if (outer_) outer_->init();
+    if (inner_) inner_->init();
+    current_outer_.clear();
+    need_new_outer_ = true;
+    outer_exhausted_ = false;
+    tuples_produced_ = 0;
+    total_time_us_ = 0;
+}
+
+bool NestedLoopJoinNode::next(TupleTableSlot& slot) {
+    auto start = std::chrono::steady_clock::now();
+    slot.clear();
+
+    if (!outer_ || !inner_ || outer_exhausted_) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        total_time_us_ += elapsed;
+        return false;
+    }
+
+    while (true) {
+        if (need_new_outer_) {
+            if (!outer_->next(current_outer_)) {
+                outer_exhausted_ = true;
+                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                total_time_us_ += elapsed;
+                return false;
+            }
+            inner_->init(); // Rewind inner relation for the new outer tuple
+            need_new_outer_ = false;
+        }
+
+        TupleTableSlot inner_slot;
+        while (inner_->next(inner_slot)) {
+            if (!predicate_ || predicate_(current_outer_, inner_slot)) {
+                slot.set_join(current_outer_.ctid, current_outer_.tuple,
+                              inner_slot.ctid, inner_slot.tuple);
+                tuples_produced_++;
+                auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - start).count();
+                total_time_us_ += elapsed;
+                return true;
+            }
+        }
+
+        // Inner relation exhausted for this outer tuple; advance to next outer tuple
+        need_new_outer_ = true;
+    }
+}
+
+void NestedLoopJoinNode::end() {
+    if (outer_) outer_->end();
+    if (inner_) inner_->end();
+    current_outer_.clear();
+}
+
+std::string NestedLoopJoinNode::explain(int indent) const {
+    std::string pad(indent, ' ');
+    std::ostringstream oss;
+    oss << pad << "->  Nested Loop";
+    if (!predicate_desc_.empty()) {
+        oss << " (Join Filter: " << predicate_desc_ << ")";
+    }
+    oss << " (produced_tuples=" << tuples_produced_ << ")\n";
+    if (outer_) {
+        oss << outer_->explain(indent + 4);
+    }
+    if (inner_) {
+        oss << "\n" << inner_->explain(indent + 4);
+    }
+    return oss.str();
+}
+
+// =============================================================================
+// HashJoinNode Implementation
+// =============================================================================
+
+HashJoinNode::HashJoinNode(std::unique_ptr<PlanNode> outer,
+                           std::unique_ptr<PlanNode> inner,
+                           KeyExtractor outer_key_fn,
+                           KeyExtractor inner_key_fn,
+                           std::string join_desc)
+    : outer_(std::move(outer)), inner_(std::move(inner)),
+      outer_key_fn_(std::move(outer_key_fn)), inner_key_fn_(std::move(inner_key_fn)),
+      join_desc_(std::move(join_desc)) {}
+
+void HashJoinNode::init() {
+    hash_table_.clear();
+    tuples_produced_ = 0;
+    total_time_us_ = 0;
+    outer_exhausted_ = false;
+    current_outer_.clear();
+
+    if (!outer_ || !inner_) return;
+
+    // Phase 1 (Build): Materialize inner relation into hash table
+    inner_->init();
+    TupleTableSlot slot;
+    while (inner_->next(slot)) {
+        int32_t k = inner_key_fn_(slot);
+        hash_table_.emplace(k, std::make_pair(slot.ctid, slot.tuple));
+    }
+    inner_->end();
+    hash_entries_ = hash_table_.size();
+
+    // Phase 2 (Probe): Initialize outer relation stream
+    outer_->init();
+    probe_current_ = hash_table_.end();
+    probe_end_ = hash_table_.end();
+}
+
+bool HashJoinNode::next(TupleTableSlot& slot) {
+    auto start = std::chrono::steady_clock::now();
+    slot.clear();
+
+    if (!outer_ || outer_exhausted_) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        total_time_us_ += elapsed;
+        return false;
+    }
+
+    while (true) {
+        // If there are pending matching inner tuples for the current outer tuple, yield them
+        if (probe_current_ != probe_end_) {
+            slot.set_join(current_outer_.ctid, current_outer_.tuple,
+                          probe_current_->second.first, probe_current_->second.second);
+            ++probe_current_;
+            tuples_produced_++;
+            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            total_time_us_ += elapsed;
+            return true;
+        }
+
+        // Fetch next outer tuple
+        if (!outer_->next(current_outer_)) {
+            outer_exhausted_ = true;
+            auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            total_time_us_ += elapsed;
+            return false;
+        }
+
+        // Probe hash table with outer tuple's join key
+        int32_t key = outer_key_fn_(current_outer_);
+        auto range = hash_table_.equal_range(key);
+        probe_current_ = range.first;
+        probe_end_ = range.second;
+    }
+}
+
+void HashJoinNode::end() {
+    if (outer_) outer_->end();
+    if (inner_) inner_->end();
+    hash_table_.clear();
+    current_outer_.clear();
+}
+
+std::string HashJoinNode::explain(int indent) const {
+    std::string pad(indent, ' ');
+    std::ostringstream oss;
+    oss << pad << "->  Hash Join";
+    if (!join_desc_.empty()) {
+        oss << " (Hash Cond: " << join_desc_ << ")";
+    }
+    oss << " (hash_entries=" << hash_entries_
+        << ", produced_tuples=" << tuples_produced_ << ")\n";
+    if (outer_) {
+        oss << outer_->explain(indent + 4);
+    }
+    if (inner_) {
+        oss << "\n" << inner_->explain(indent + 4);
+    }
+    return oss.str();
+}
+
+// =============================================================================
 // ExecutionEngine Utility Implementation
 // =============================================================================
 
@@ -267,6 +457,17 @@ std::vector<std::pair<CTID, HeapTuple>> ExecutionEngine::execute(PlanNode& plan)
     TupleTableSlot slot;
     while (plan.next(slot)) {
         results.emplace_back(slot.ctid, slot.tuple);
+    }
+    plan.end();
+    return results;
+}
+
+std::vector<TupleTableSlot> ExecutionEngine::execute_slots(PlanNode& plan) {
+    std::vector<TupleTableSlot> results;
+    plan.init();
+    TupleTableSlot slot;
+    while (plan.next(slot)) {
+        results.push_back(slot);
     }
     plan.end();
     return results;
@@ -308,3 +509,4 @@ std::string ExecutionEngine::explain(PlanNode& plan, bool analyze) {
 }
 
 } // namespace pg
+

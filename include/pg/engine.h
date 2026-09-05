@@ -106,6 +106,8 @@ private:
 
     void ensure_transaction(bool is_read_only = false);
     std::string format_table(const std::vector<std::pair<CTID, HeapTuple>>& tuples, const std::string& scan_method);
+    std::string format_join_table(const std::vector<TupleTableSlot>& slots, const std::string& scan_method);
 };
+
 
 } // namespace pg
