@@ -145,6 +145,18 @@ target_link_libraries(test_locks PRIVATE pg_core)
 add_executable(test_catalog tests/test_catalog.cpp)
 target_link_libraries(test_catalog PRIVATE pg_core)
 
+# -----------------------------------------------------------------------------
+# Amazon S3 Distributed Storage Engine (cpp-s3)
+# -----------------------------------------------------------------------------
+add_library(s3_core
+    src/s3/chunk_store.cpp
+    src/s3/extent_index.cpp
+    src/s3/multipart.cpp
+)
+
+add_executable(test_s3_storage tests/test_s3_storage.cpp)
+target_link_libraries(test_s3_storage PRIVATE s3_core)
+
 
 
 
