@@ -46,10 +46,14 @@ flowchart LR
    PostgreSQL's on-disk TOAST pointer is **also 18 bytes**, but the fields differ: a 1-byte `varattrib_1b_e` header, a 1-byte `va_tag`, then a 16-byte `varatt_external` of `va_rawsize` (int32), `va_extsize` (int32), `va_valueid` (Oid) and `va_toastrelid` (Oid). Two consequences of that layout:
    - PostgreSQL stores the *relation* OID in the pointer, so a detoast can find its TOAST table from the datum alone. This engine hard-wires a single TOAST relation.
    - `va_extsize` is the **stored** (post-compression) size and `va_rawsize` the original; when they differ, the value is compressed and the low bits of `va_rawsize` encode which algorithm. There is no chunk count — PostgreSQL derives it by scanning the TOAST index.
-2. **ToastChunk Structure** (`[include/pg/toast.h:39-43]`):
-   - `toast_id` (8 Bytes), `chunk_seq` (4 Bytes), `data` (`std::vector<uint8_t>`, storing up to 2,048-byte chunks).
-
-   In PostgreSQL a TOAST table is an ordinary heap relation named `pg_toast.pg_toast_<oid>` with the schema `(chunk_id oid, chunk_seq int4, chunk_data bytea)`, plus a **unique B-tree index on `(chunk_id, chunk_seq)`**. Detoasting is therefore an index scan, and the chunks are themselves MVCC row versions with their own `xmin`/`xmax`, visible in `pg_class` and vacuumed like any other table. This engine keeps chunks in a bespoke file with a linear layout and no index.
+2. **ToastChunkHeader & Chunk Structure** (`[include/pg/toast.h:40-57]`):
+   - `ToastChunkHeader` (16 Bytes):
+     - `toast_id` (8 Bytes): ID of the toasted attribute (`uint64_t`).
+     - `chunk_seq` (4 Bytes): Chunk sequence number $0 \le \text{seq} < \text{chunk\_count}$ (`uint32_t`).
+     - `data_len` (4 Bytes): Byte length of chunk payload ($\le 2048$, `uint32_t`).
+   - Every chunk is stored as a slotted tuple `(ToastChunkHeader + chunk_data)` on dedicated 8KB TOAST pages.
+   - **Cross-Restart Reconstruction**: `ToastManager::scan_existing_pages()` scans all allocated TOAST pages on startup, populates `chunk_index_`, and initializes `next_toast_id_ = max(id) + 1`.
+   - **WAL Logging & Crash Durability**: Each chunk write generates a `WALRecordType::TOAST_INSERT` record before updating disk, setting `pd_lsn` on the TOAST page. During startup crash recovery, `WALManager::recover()` replays `TOAST_INSERT` records to reconstruct missing or uncommitted chunks.
 3. **Sequential Scan Preservation**: Sequential scans over normal columns (e.g. `SELECT price FROM items;`) never read or load TOAST pages into shared buffers, avoiding massive I/O pollution (`[src/toast.cpp:65]`).
 
 ---

@@ -15,6 +15,7 @@ namespace pg {
 
 class HeapFile;
 class BufferPoolManager;
+class ToastManager;
 
 using lsn_t = uint64_t;
 constexpr lsn_t INVALID_LSN = 0;
@@ -27,7 +28,8 @@ enum class WALRecordType : uint8_t {
     ABORT = 4,
     CHECKPOINT = 5,
     FPI = 6, // Full-Page Image (Torn-page protection)
-    CLR = 7  // Compensation Log Record (Undo compensation)
+    CLR = 7, // Compensation Log Record (Undo compensation)
+    TOAST_INSERT = 8 // TOAST chunk insertion
 };
 
 #pragma pack(push, 1)
@@ -77,6 +79,7 @@ public:
     lsn_t log_abort(tx_id_t tx_id);
     lsn_t log_checkpoint();
     lsn_t log_fpi(page_id_t page_id, const void* page_data);
+    lsn_t log_toast_insert(tx_id_t tx_id, uint64_t toast_id, uint32_t chunk_seq, page_id_t page_id, slot_id_t slot_id, const void* chunk_data, size_t chunk_len);
 
     // Make every record up to target_lsn durable. This is a real fsync, not a
     // userspace buffer flush: it is the barrier that COMMIT and dirty-page
@@ -109,8 +112,8 @@ public:
     BufferPoolManager* bpm() const { return bpm_; }
 
     // Crash Recovery: Scans WAL from checkpoint_lsn, verifies CRCs, restores FPI baselines,
-    // and replays all committed operations onto the heap file
-    size_t recover(HeapFile& heap, TransactionManager& tm);
+    // and replays all committed operations onto the heap and toast relations
+    size_t recover(HeapFile& heap, TransactionManager& tm, ToastManager* toast = nullptr);
 
     // Truncate the log. Used after a checkpoint proves every prior record is
     // reflected on disk, so recovery need never look further back.

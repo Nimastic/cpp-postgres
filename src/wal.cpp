@@ -2,6 +2,7 @@
 #include "pg/heap.h"
 #include "pg/buffer_pool.h"
 #include "pg/page.h"
+#include "pg/toast.h"
 #include <iostream>
 #include <cstring>
 #include <set>
@@ -142,6 +143,23 @@ lsn_t WALManager::log_fpi(page_id_t page_id, const void* page_data) {
     return lsn;
 }
 
+lsn_t WALManager::log_toast_insert(tx_id_t tx_id, uint64_t toast_id, uint32_t chunk_seq,
+                                   page_id_t page_id, slot_id_t slot_id,
+                                   const void* chunk_data, size_t chunk_len) {
+    ToastChunkHeader hdr;
+    hdr.toast_id = toast_id;
+    hdr.chunk_seq = chunk_seq;
+    hdr.data_len = static_cast<uint32_t>(chunk_len);
+
+    std::vector<uint8_t> payload(sizeof(ToastChunkHeader) + chunk_len);
+    std::memcpy(payload.data(), &hdr, sizeof(ToastChunkHeader));
+    if (chunk_data != nullptr && chunk_len > 0) {
+        std::memcpy(payload.data() + sizeof(ToastChunkHeader), chunk_data, chunk_len);
+    }
+
+    return append_record(WALRecordType::TOAST_INSERT, tx_id, page_id, slot_id, payload.data(), payload.size());
+}
+
 void WALManager::flush(lsn_t target_lsn) {
     if (!file_.is_open() || target_lsn <= flushed_lsn_) {
         return;
@@ -210,7 +228,7 @@ struct RecoveryPager {
 
 } // namespace
 
-size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
+size_t WALManager::recover(HeapFile& heap, TransactionManager& tm, ToastManager* toast) {
     flush();
 
     RecoveryPager rp{heap, bpm_};
@@ -352,6 +370,39 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
                 });
             }
             if (did) replayed_count++;
+
+        } else if (rec.header.type == WALRecordType::TOAST_INSERT) {
+            if (toast != nullptr && rec.payload.size() >= sizeof(ToastChunkHeader)) {
+                ToastChunkHeader chdr;
+                std::memcpy(&chdr, rec.payload.data(), sizeof(ToastChunkHeader));
+                const uint8_t* chunk_bytes = rec.payload.data() + sizeof(ToastChunkHeader);
+                size_t chunk_len = chdr.data_len;
+                if (sizeof(ToastChunkHeader) + chunk_len <= rec.payload.size()) {
+                    page_id_t pid = rec.header.page_id;
+                    slot_id_t slot = rec.header.slot_id;
+
+                    while (toast->pager().num_pages() <= pid) {
+                        page_id_t new_pid = toast->pager().allocate_page();
+                        PageBuffer fresh;
+                        toast->pager().write_page(new_pid, fresh.data());
+                    }
+
+                    std::vector<uint8_t> page_buf(PAGE_SIZE, 0);
+                    toast->pager().read_page(pid, page_buf.data());
+                    Page page(page_buf.data());
+
+                    if (page.lsn() <= rec.header.lsn) {
+                        toast->replay_insert(chdr.toast_id, chdr.chunk_seq, pid, slot, chunk_bytes, chunk_len);
+                        toast->pager().read_page(pid, page_buf.data());
+                        Page updated_page(page_buf.data());
+                        updated_page.set_lsn(end_lsn);
+                        toast->pager().write_page(pid, updated_page.data());
+                        replayed_count++;
+                    } else {
+                        toast->replay_insert(chdr.toast_id, chdr.chunk_seq, pid, slot, chunk_bytes, chunk_len);
+                    }
+                }
+            }
         }
     }
 
@@ -429,6 +480,25 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
                         rp.with_page(upd.new_ctid.page, clr_end, clr_end, undo_new);
                     }
                 }
+            } else if (rec.header.type == WALRecordType::TOAST_INSERT) {
+                if (toast != nullptr && rec.payload.size() >= sizeof(ToastChunkHeader)) {
+                    ToastChunkHeader chdr;
+                    std::memcpy(&chdr, rec.payload.data(), sizeof(ToastChunkHeader));
+                    page_id_t pid = rec.header.page_id;
+                    slot_id_t slot = rec.header.slot_id;
+                    if (pid < toast->pager().num_pages()) {
+                        lsn_t clr = append_record(WALRecordType::CLR, rec.header.tx_id, pid, slot, nullptr, 0);
+                        lsn_t clr_end = clr + sizeof(WALRecordHeader);
+                        std::vector<uint8_t> page_buf(PAGE_SIZE, 0);
+                        toast->pager().read_page(pid, page_buf.data());
+                        Page page(page_buf.data());
+                        LinePointer lp; lp.set(0, 0, ItemFlags::UNUSED);
+                        page.set_line_pointer(slot, lp);
+                        page.set_lsn(clr_end);
+                        toast->pager().write_page(pid, page.data());
+                        toast->delete_value(chdr.toast_id);
+                    }
+                }
             }
         }
 
@@ -443,6 +513,9 @@ size_t WALManager::recover(HeapFile& heap, TransactionManager& tm) {
     if (bpm_ != nullptr) {
         bpm_->flush_all();
         bpm_->pager().sync();
+    }
+    if (toast != nullptr) {
+        toast->flush();
     }
     flush();
 

@@ -104,15 +104,86 @@ void run_toast_integration_tests() {
         std::string all = engine.execute("SELECT * FROM items;");
         std::cout << all;
         assert(all.find("3 rows returned") != std::string::npos);
-        std::cout << " -> All rows and TOASTed tuples verified surviving restart across disk files!\n";
+        assert(engine.toast().total_chunks() == 5);
+
+        // Fetch back 10,000-byte document across restart
+        pg::ToastValue tv;
+        tv.type = pg::ToastStorageType::OUT_OF_LINE;
+        tv.pointer.toast_id = 1;
+        tv.pointer.raw_size = 10001;
+        tv.pointer.chunk_count = 5;
+        std::string recovered_doc = engine.toast().fetch_string(tv);
+        assert(recovered_doc == large_doc);
+        std::cout << " -> All rows and 10,000-byte TOASTed doc verified surviving restart across disk files!\n";
+    }
+
+    // =========================================================================
+    // TEST 5: Crash Recovery Replay of TOAST Chunks from WAL
+    // =========================================================================
+    std::cout << "\n[Step 5] Testing TOAST WAL logging and ARIES crash recovery replay..." << std::endl;
+    const std::string crash_prefix = "test_toast_crash_engine";
+    const std::string c_wal_file   = crash_prefix + "_wal.log";
+    const std::string c_heap_file  = crash_prefix + "_heap.db";
+    const std::string c_clog_file  = crash_prefix + "_clog.db";
+    const std::string c_toast_file = crash_prefix + "_toast.db";
+    const std::string c_index_file = crash_prefix + "_index.db";
+    const std::string c_ctrl_file  = crash_prefix + "_control.db";
+
+    for (const auto& f : {c_wal_file, c_heap_file, c_clog_file, c_toast_file, c_index_file, c_ctrl_file}) {
+        if (fs::exists(f)) fs::remove(f);
+    }
+
+    std::string huge_doc(20480, 'X'); // 20KB payload -> 11 chunks (with null terminator 20481)
+    {
+        pg::Engine engine(crash_prefix);
+        engine.execute("BEGIN;");
+        std::string ins = engine.insert_item_with_doc(500, 50, huge_doc);
+        std::cout << ins;
+        assert(ins.find("11 chunks of 2KB") != std::string::npos);
+        engine.execute("COMMIT;");
+        assert(engine.toast().total_chunks() == 11);
+    }
+
+    // Simulate sudden crash before TOAST pages were synced to disk:
+    // Mark control file as unclean (needs recovery) and delete the toast relation file.
+    {
+        pg::ControlFile ctrl(c_ctrl_file);
+        ctrl.mark_in_production();
+    }
+    if (fs::exists(c_toast_file)) {
+        fs::remove(c_toast_file);
+    }
+
+    // Restart engine: Startup recovery will see unclean control file,
+    // invoke wal_->recover(*heap_, tm_, toast_.get()),
+    // and replay all 11 TOAST_INSERT records from WAL into toast relation!
+    {
+        pg::Engine recovered_engine(crash_prefix);
+        assert(recovered_engine.recovered_at_startup());
+        assert(recovered_engine.toast().total_chunks() == 11);
+
+        pg::ToastValue tv;
+        tv.type = pg::ToastStorageType::OUT_OF_LINE;
+        tv.pointer.toast_id = 1;
+        tv.pointer.raw_size = 20481;
+        tv.pointer.chunk_count = 11;
+        std::string replayed_doc = recovered_engine.toast().fetch_string(tv);
+        assert(replayed_doc == huge_doc);
+        std::cout << " -> Verified: All 11 TOAST chunks replayed from WAL and 20KB doc recovered byte-for-byte!\n";
+    }
+
+    for (const auto& f : {c_wal_file, c_heap_file, c_clog_file, c_toast_file, c_index_file, c_ctrl_file}) {
+        if (fs::exists(f)) fs::remove(f);
     }
 
     fs::remove(wal_file);
     fs::remove(heap_file);
     fs::remove(clog_file);
     fs::remove(toast_file);
+    if (fs::exists(db_prefix + "_index.db"))   fs::remove(db_prefix + "_index.db");
+    if (fs::exists(db_prefix + "_control.db")) fs::remove(db_prefix + "_control.db");
 
-    std::cout << "\n>>> ITEM 17 (TOAST HEAP + INDEX INTEGRATION) TESTS PASSED SUCCESSFULLY! <<<\n" << std::endl;
+    std::cout << "\n>>> ITEM 17 (TOAST HEAP + INDEX INTEGRATION & ARIES CRASH RECOVERY) TESTS PASSED SUCCESSFULLY! <<<\n" << std::endl;
 }
 
 int main() {

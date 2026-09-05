@@ -1,23 +1,60 @@
 #include "pg/toast.h"
+#include "pg/wal.h"
 #include <iostream>
+#include <cstring>
+#include <algorithm>
 
 namespace pg {
 
-ToastManager::ToastManager(std::unique_ptr<Pager> toast_pager) : pager_(std::move(toast_pager)) {
+ToastManager::ToastManager(std::unique_ptr<Pager> toast_pager, WALManager* wal)
+    : pager_(std::move(toast_pager)), wal_(wal) {
     if (pager_ && pager_->num_pages() == 0) {
         // Initialize Page 0 for TOAST table
         page_id_t pid = pager_->allocate_page();
         PageBuffer p0;
         pager_->write_page(pid, p0.data());
+    } else if (pager_) {
+        scan_existing_pages();
     }
 }
 
-std::unique_ptr<ToastManager> ToastManager::open(const std::string& toast_filepath) {
+std::unique_ptr<ToastManager> ToastManager::open(const std::string& toast_filepath, WALManager* wal) {
     auto pager = Pager::open(toast_filepath);
-    return std::make_unique<ToastManager>(std::move(pager));
+    return std::make_unique<ToastManager>(std::move(pager), wal);
 }
 
-ToastValue ToastManager::store(const void* data, size_t len) {
+void ToastManager::scan_existing_pages() {
+    if (!pager_) return;
+
+    for (page_id_t pid = 0; pid < pager_->num_pages(); ++pid) {
+        std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
+        pager_->read_page(pid, page_buffer.data());
+        Page page(page_buffer.data());
+
+        for (slot_id_t s = 1; s <= page.num_slots(); ++s) {
+            auto lp = page.get_line_pointer(s);
+            if (!lp.has_value() || lp->flags() != ItemFlags::NORMAL) {
+                continue;
+            }
+
+            size_t tuple_len = 0;
+            const uint8_t* ptr = page.get_tuple_ptr(s, &tuple_len);
+            if (ptr != nullptr && tuple_len >= sizeof(ToastChunkHeader)) {
+                ToastChunkHeader hdr;
+                std::memcpy(&hdr, ptr, sizeof(ToastChunkHeader));
+                if (sizeof(ToastChunkHeader) + hdr.data_len <= tuple_len) {
+                    std::vector<uint8_t> chunk_buf(ptr + sizeof(ToastChunkHeader), ptr + sizeof(ToastChunkHeader) + hdr.data_len);
+                    chunk_index_[{hdr.toast_id, hdr.chunk_seq}] = std::move(chunk_buf);
+                    if (hdr.toast_id >= next_toast_id_) {
+                        next_toast_id_ = hdr.toast_id + 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+ToastValue ToastManager::store(const void* data, size_t len, tx_id_t tx_id) {
     // Small payload (<= 2KB): Stored directly inline in standard HeapTuple
     if (len <= TOAST_TUPLE_THRESHOLD) {
         ToastValue val;
@@ -41,7 +78,7 @@ ToastValue ToastManager::store(const void* data, size_t len) {
         std::vector<uint8_t> chunk_buf(byte_ptr, byte_ptr + current_chunk_len);
 
         chunk_index_[{toast_id, seq}] = chunk_buf;
-        flush_chunk_to_page(toast_id, seq, byte_ptr, current_chunk_len);
+        flush_chunk_to_page(toast_id, seq, byte_ptr, current_chunk_len, tx_id);
 
         byte_ptr += current_chunk_len;
         bytes_remaining -= current_chunk_len;
@@ -58,8 +95,8 @@ ToastValue ToastManager::store(const void* data, size_t len) {
     return val;
 }
 
-ToastValue ToastManager::store_string(const std::string& text) {
-    return store(text.data(), text.size() + 1); // include null terminator
+ToastValue ToastManager::store_string(const std::string& text, tx_id_t tx_id) {
+    return store(text.data(), text.size() + 1, tx_id); // include null terminator
 }
 
 std::vector<uint8_t> ToastManager::fetch(const ToastValue& val) {
@@ -105,17 +142,71 @@ bool ToastManager::delete_value(uint64_t toast_id) {
     return erased;
 }
 
-void ToastManager::flush_chunk_to_page(uint64_t toast_id, uint32_t chunk_seq, const void* data, size_t len) {
+void ToastManager::replay_insert(uint64_t toast_id, uint32_t chunk_seq, page_id_t page_id, slot_id_t slot_id, const void* data, size_t len) {
+    if (data != nullptr && len > 0) {
+        std::vector<uint8_t> chunk_buf(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + len);
+        chunk_index_[{toast_id, chunk_seq}] = std::move(chunk_buf);
+    } else {
+        chunk_index_[{toast_id, chunk_seq}] = {};
+    }
+
+    if (toast_id >= next_toast_id_) {
+        next_toast_id_ = toast_id + 1;
+    }
+
     if (!pager_) return;
+
+    while (pager_->num_pages() <= page_id) {
+        page_id_t pid = pager_->allocate_page();
+        PageBuffer fresh;
+        pager_->write_page(pid, fresh.data());
+    }
+
+    std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
+    pager_->read_page(page_id, page_buffer.data());
+    Page page(page_buffer.data());
+
+    ToastChunkHeader hdr;
+    hdr.toast_id = toast_id;
+    hdr.chunk_seq = chunk_seq;
+    hdr.data_len = static_cast<uint32_t>(len);
+
+    std::vector<uint8_t> tuple_buf(sizeof(ToastChunkHeader) + len);
+    std::memcpy(tuple_buf.data(), &hdr, sizeof(ToastChunkHeader));
+    if (data != nullptr && len > 0) {
+        std::memcpy(tuple_buf.data() + sizeof(ToastChunkHeader), data, len);
+    }
+
+    page.insert_tuple_at(slot_id, tuple_buf.data(), tuple_buf.size());
+    pager_->write_page(page_id, page.data());
+}
+
+void ToastManager::flush_chunk_to_page(uint64_t toast_id, uint32_t chunk_seq, const void* data, size_t len, tx_id_t tx_id) {
+    if (!pager_) return;
+
+    ToastChunkHeader hdr;
+    hdr.toast_id = toast_id;
+    hdr.chunk_seq = chunk_seq;
+    hdr.data_len = static_cast<uint32_t>(len);
+
+    std::vector<uint8_t> tuple_buf(sizeof(ToastChunkHeader) + len);
+    std::memcpy(tuple_buf.data(), &hdr, sizeof(ToastChunkHeader));
+    if (data != nullptr && len > 0) {
+        std::memcpy(tuple_buf.data() + sizeof(ToastChunkHeader), data, len);
+    }
 
     page_id_t target_page_id = static_cast<page_id_t>(pager_->num_pages() - 1);
     std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
     pager_->read_page(target_page_id, page_buffer.data());
 
     Page page(page_buffer.data());
-    slot_id_t slot = page.insert_tuple(data, len);
+    slot_id_t slot = page.insert_tuple(tuple_buf.data(), tuple_buf.size());
 
     if (slot != INVALID_SLOT_ID) {
+        if (wal_ != nullptr) {
+            lsn_t lsn = wal_->log_toast_insert(tx_id, toast_id, chunk_seq, target_page_id, slot, data, len);
+            page.set_lsn(lsn);
+        }
         pager_->write_page(target_page_id, page.data());
         return;
     }
@@ -123,12 +214,23 @@ void ToastManager::flush_chunk_to_page(uint64_t toast_id, uint32_t chunk_seq, co
     // Current TOAST page is full -> allocate new 8KB TOAST page
     page_id_t new_pid = pager_->allocate_page();
     PageBuffer new_page;
-    slot_id_t new_slot = new_page->insert_tuple(data, len);
+    slot_id_t new_slot = new_page->insert_tuple(tuple_buf.data(), tuple_buf.size());
     if (new_slot == INVALID_SLOT_ID) {
         throw std::runtime_error("ToastManager: Chunk larger than empty 8KB page");
     }
 
+    if (wal_ != nullptr) {
+        lsn_t lsn = wal_->log_toast_insert(tx_id, toast_id, chunk_seq, new_pid, new_slot, data, len);
+        new_page->set_lsn(lsn);
+    }
+
     pager_->write_page(new_pid, new_page.data());
+}
+
+void ToastManager::flush() {
+    if (pager_) {
+        pager_->sync();
+    }
 }
 
 } // namespace pg

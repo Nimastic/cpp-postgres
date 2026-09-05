@@ -33,7 +33,7 @@ Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
 
     heap_ = HeapFile::open(db_prefix_ + "_heap.db");
     wal_ = WALManager::open(db_prefix_ + "_wal.log");
-    toast_ = ToastManager::open(db_prefix_ + "_toast.db");
+    toast_ = ToastManager::open(db_prefix_ + "_toast.db", wal_.get());
     index_ = DiskBTree::open(db_prefix_ + "_index.db");
 
     // One pool per relation. The heap made its own on construction and the
@@ -56,7 +56,7 @@ Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
     // Crash recovery, decided by the control file and run before the database
     // serves anything, rather than left for an operator to invoke by hand.
     if (control_->needs_recovery()) {
-        size_t replayed = wal_->recover(*heap_, tm_);
+        size_t replayed = wal_->recover(*heap_, tm_, toast_.get());
         recovered_at_startup_ = true;
         if (replayed > 0) {
             std::cerr << "[STARTUP] Unclean shutdown detected; replayed "
@@ -85,6 +85,9 @@ Engine::~Engine() {
         // disk. Marking first would let a crash in between look clean.
         if (index_) {
             index_->flush();
+        }
+        if (toast_) {
+            toast_->flush();
         }
         if (heap_ && heap_->bpm()) {
             heap_->bpm()->flush_all();
@@ -196,7 +199,7 @@ std::string Engine::insert_item_with_doc(int32_t item_id, int32_t price, const s
     }
 
     tx_id_t tx_id = *sess_->current_tx;
-    ToastValue tv = toast_->store_string(doc);
+    ToastValue tv = toast_->store_string(doc, tx_id);
 
     CTID ctid = heap_->insert({item_id, price}, tx_id);
 
@@ -441,7 +444,7 @@ std::string Engine::status() {
 }
 
 std::string Engine::recover() {
-    size_t replayed = wal_->recover(*heap_, tm_);
+    size_t replayed = wal_->recover(*heap_, tm_, toast_.get());
     std::ostringstream oss;
     oss << "[REDO RECOVERY] Successfully scanned WAL and replayed " << replayed 
         << " committed log records into heap table.\n";
@@ -598,6 +601,9 @@ std::string Engine::execute(const std::string& sql) {
 std::string Engine::checkpoint() {
     if (index_) {
         index_->flush();
+    }
+    if (toast_) {
+        toast_->flush();
     }
     if (heap_ && heap_->bpm()) {
         heap_->bpm()->flush_all();

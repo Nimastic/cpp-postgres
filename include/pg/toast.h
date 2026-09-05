@@ -3,6 +3,7 @@
 #include "pg/constants.h"
 #include "pg/pager.h"
 #include "pg/page.h"
+#include "pg/tuple.h"
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -35,6 +36,19 @@ struct ToastPointer {
 
 static_assert(sizeof(ToastPointer) == 18, "ToastPointer must be exactly 18 bytes");
 
+class WALManager;
+
+#pragma pack(push, 1)
+// 16-byte binary header stored before each chunk tuple on a TOAST slotted page
+struct ToastChunkHeader {
+    uint64_t toast_id{0};       // ID of the toasted attribute
+    uint32_t chunk_seq{0};      // Chunk sequence number (0 .. chunk_count - 1)
+    uint32_t data_len{0};       // Length of following chunk data bytes (<= 2048)
+};
+#pragma pack(pop)
+
+static_assert(sizeof(ToastChunkHeader) == 16, "ToastChunkHeader must be exactly 16 bytes");
+
 // An individual 2KB chunk in the auxiliary TOAST table
 struct ToastChunk {
     uint64_t toast_id{0};
@@ -58,21 +72,23 @@ struct ToastValue {
 // Manages:
 // 1. Automatic inline vs out-of-line thresholding (<=2KB vs >2KB)
 // 2. Slicing oversized payloads into 2KB chunks with (toast_id, chunk_seq)
-// 3. Storing chunks across dedicated 8KB TOAST pages
+// 3. Storing chunks across dedicated 8KB TOAST pages with ToastChunkHeader
 // 4. Transparent multi-chunk reassembly upon read
+// 5. WAL logging for all chunk insertions
+// 6. Cross-restart chunk index recovery from disk
 class ToastManager {
 public:
-    explicit ToastManager(std::unique_ptr<Pager> toast_pager);
+    explicit ToastManager(std::unique_ptr<Pager> toast_pager, WALManager* wal = nullptr);
     ~ToastManager() = default;
 
     // Factory method
-    static std::unique_ptr<ToastManager> open(const std::string& toast_filepath);
+    static std::unique_ptr<ToastManager> open(const std::string& toast_filepath, WALManager* wal = nullptr);
 
-    // Ingests an arbitrary payload:
+    // Ingests an arbitrary payload with optional transaction ID for WAL logging:
     // If len <= 2048: returns inline ToastValue directly.
     // If len > 2048: slices into 2KB chunks, writes to TOAST table, and returns ToastPointer.
-    ToastValue store(const void* data, size_t len);
-    ToastValue store_string(const std::string& text);
+    ToastValue store(const void* data, size_t len, tx_id_t tx_id = 0);
+    ToastValue store_string(const std::string& text, tx_id_t tx_id = 0);
 
     // Reassembles the full original payload:
     // If inline: returns inline bytes.
@@ -83,19 +99,32 @@ public:
     // Delete chunks for a toasted value
     bool delete_value(uint64_t toast_id);
 
+    // Replay chunk insertion during WAL crash recovery
+    void replay_insert(uint64_t toast_id, uint32_t chunk_seq, page_id_t page_id, slot_id_t slot_id, const void* data, size_t len);
+
+    // Wire WAL manager for crash-durable logging
+    void set_wal(WALManager* wal) { wal_ = wal; }
+    WALManager* wal() const { return wal_; }
+
+    // Flush dirty pages and sync underlying pager file
+    void flush();
+
     // TOAST table metrics
     size_t total_chunks() const { return chunk_index_.size(); }
     size_t num_pages() const { return pager_->num_pages(); }
+    Pager& pager() { return *pager_; }
 
 private:
     std::unique_ptr<Pager> pager_;
+    WALManager* wal_{nullptr};
     uint64_t next_toast_id_{1};
 
     // Fast memory mapping: (toast_id, chunk_seq) -> chunk data
-    // In disk persistence, chunks are packed into 8KB TOAST pages
+    // Restored on startup from slotted pages on disk
     std::map<std::pair<uint64_t, uint32_t>, std::vector<uint8_t>> chunk_index_;
 
-    void flush_chunk_to_page(uint64_t toast_id, uint32_t chunk_seq, const void* data, size_t len);
+    void scan_existing_pages();
+    void flush_chunk_to_page(uint64_t toast_id, uint32_t chunk_seq, const void* data, size_t len, tx_id_t tx_id);
 };
 
 } // namespace pg

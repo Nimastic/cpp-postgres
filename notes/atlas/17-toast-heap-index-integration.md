@@ -41,7 +41,7 @@ flowchart TD
 2. **Zero Index Decoupling Impact**: Because the secondary index stores $(\text{item\_id} \rightarrow \text{CTID})$, the index node size is strictly 10 bytes regardless of whether the indexed row contains a 10-byte string or a 100-megabyte document.
 
    This holds because the index key here is the small `item_id`. It is **not** a general PostgreSQL property: if you index the *toastable* column itself, the B-tree stores the value inline in the index tuple, detoasted (though it may stay compressed). PostgreSQL caps a B-tree entry at roughly a third of a page and raises `index row size ... exceeds btree version 4 maximum 2704` past that — the reason large-text indexing normally goes through an expression index on a hash, or a GIN full-text index.
-3. **Cross-Relation Durability**: On engine restart, the main heap relation (`*_heap.db`) and auxiliary TOAST relation (`*_toast.db`) are reopened simultaneously, ensuring data consistency.
+3. **Cross-Relation Durability & Crash Recovery**: On engine startup, `ToastManager` restores in-memory chunk indexes from disk pages via `scan_existing_pages()`. If an unclean shutdown occurred, `WALManager::recover()` replays all committed `TOAST_INSERT` records to restore missing TOAST pages and chunks with byte-for-byte fidelity.
 
 ---
 

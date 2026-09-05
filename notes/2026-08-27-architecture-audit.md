@@ -29,7 +29,7 @@ items. Regression coverage lives in `tests/test_recovery.cpp` and
 | 2.4 | Copy-in/copy-out buffer pool | **Fixed** | `Page` is a view over the frame; `PinnedPage` holds the pin across read-modify-write |
 | 2.5 | No executor | **Partly** | scans filter as they go instead of materialising the table; still no plan tree |
 | 2.6 | No free space map | **Partly** | inserts search back for a page with room, so reclaimed space is reusable; no `_fsm` fork |
-| 2.7 | TOAST writes no WAL | **Open** | |
+| 2.7 | TOAST writes no WAL | **Fixed** | `ToastChunkHeader` on-disk layout; `ToastManager::scan_existing_pages()` startup recovery; `WALRecordType::TOAST_INSERT`; ARIES REDO/UNDO replay |
 | 2.8 | CLOG I/O per transaction | **Partly** | `begin_transaction` no longer writes CLOG; commit/abort still go straight to the pager |
 | 3.1 | Clock sweep threw spuriously | **Fixed** | `usage_count` capped at `BUF_USAGECOUNT_MAX = 5`; sweep bounded by the cap |
 | 3.2 | CLR/ABORT silently dropped | **Fixed** | positioned writes; no sticky stream state |
@@ -187,6 +187,13 @@ $ grep -c "wal" src/toast.cpp
 ```
 
 `insert_item_with_doc` writes TOAST chunks, inserts the heap tuple, then stamps `HEAP_HASEXTERNAL` — three separate page writes — and logs a single INSERT record covering only the heap tuple. After recovery, a restored tuple can carry a TOAST pointer to chunks that were never logged and may not exist. In PostgreSQL a TOAST table is an ordinary relation and its chunk inserts are WAL-logged like any other heap insert.
+
+**Resolution (Fixed)**:
+1. **On-Disk Slotted Page Chunk Format**: Defined `ToastChunkHeader` (16 bytes: `toast_id`, `chunk_seq`, `data_len`) preceding every chunk payload on auxiliary 8KB TOAST slotted pages.
+2. **Startup Index Reconstruction**: Added `ToastManager::scan_existing_pages()`, reading all allocated TOAST pages and slotted line pointers at startup, reconstructing `chunk_index_` and advancing `next_toast_id_ = max(id) + 1` so toasted values survive restarts.
+3. **WAL Logging**: Added `WALRecordType::TOAST_INSERT` (type 8). In `ToastManager::flush_chunk_to_page`, each chunk write emits a `TOAST_INSERT` record before updating disk, setting `pd_lsn` on the TOAST page.
+4. **ARIES Crash Recovery**: `WALManager::recover` replays committed `TOAST_INSERT` records during the REDO pass via `ToastManager::replay_insert()`, and compensates uncommitted loser chunks in the UNDO pass.
+5. **Regression Testing**: Added `Step 5` in `tests/test_toast_integration.cpp` verifying 20KB document crash recovery across simulated crashes.
 
 ### 2.8 CLOG does 16 KB of I/O per status change and bypasses the pool
 
