@@ -26,6 +26,7 @@ add_library(pg_core
     src/disk_btree.cpp
     src/fsm.cpp
     src/executor.cpp
+    src/lock.cpp
     src/http_server.cpp
     src/pgwire.cpp
 )
@@ -134,6 +135,11 @@ target_link_libraries(test_executor PRIVATE pg_core)
 # Item 24 test executable (Relational Joins: Nested-Loop & Hash Join)
 add_executable(test_joins tests/test_joins.cpp)
 target_link_libraries(test_joins PRIVATE pg_core)
+
+# Item 25 test executable (Two-Phase Locking 2PL & Deadlock Detection)
+add_executable(test_locks tests/test_locks.cpp)
+target_link_libraries(test_locks PRIVATE pg_core)
+
 
 
 # -----------------------------------------------------------------------------

@@ -14,7 +14,7 @@ MINGW="/c/Users/jerie/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinL
 TESTS="test_pager test_page test_heap test_mvcc test_vacuum test_index test_hot
        test_buffer_pool test_wal test_toast test_repl test_buffer_integration
        test_clog test_disk_btree test_checkpoint test_undo test_toast_integration
-       test_recovery test_concurrency test_fsm test_executor test_joins"
+       test_recovery test_concurrency test_fsm test_executor test_joins test_locks"
 
 if [ "${1:-}" != "--no-build" ]; then
     ninja -C "$BUILD" || exit 1
