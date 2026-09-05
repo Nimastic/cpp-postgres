@@ -8,7 +8,9 @@
 #include "pg/mvcc.h"
 #include "pg/heap.h"
 #include "pg/vacuum.h"
+#include "pg/index.h"
 #include "pg/btree.h"
+#include "pg/disk_btree.h"
 #include "pg/buffer_pool.h"
 #include "pg/wal.h"
 #include "pg/toast.h"
@@ -71,7 +73,7 @@ public:
     // Direct Subsystem Access
     TransactionManager& tm() { return tm_; }
     HeapFile& heap() { return *heap_; }
-    BTreeIndex& index() { return index_; }
+    DiskBTree& index() { return *index_; }
     WALManager& wal() { return *wal_; }
     // The relation owns the pool; the engine just exposes it. There is
     // deliberately no second pool over the same file.
@@ -91,7 +93,7 @@ private:
     std::unique_ptr<HeapFile> heap_;
     std::unique_ptr<WALManager> wal_;
     std::unique_ptr<ToastManager> toast_;
-    BTreeIndex index_; // Secondary B-Tree index on items(item_id)
+    std::unique_ptr<DiskBTree> index_; // On-disk B-Tree index on items(item_id)
 
     Session  default_session_;
     Session* sess_{&default_session_};   // The session the current statement runs for

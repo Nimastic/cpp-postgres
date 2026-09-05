@@ -1,11 +1,13 @@
 # Item 14: On-Disk B-Tree Index with Dynamic Node Splits
 
 **Confidence**: `verified`  
-**Citations**: [include/pg/disk_btree.h:1-95](file:///c:/Users/jerie/Documents/GitHub/cpp-postgres/include/pg/disk_btree.h), [src/disk_btree.cpp:1-240](file:///c:/Users/jerie/Documents/GitHub/cpp-postgres/src/disk_btree.cpp), [tests/test_disk_btree.cpp:1-140](file:///c:/Users/jerie/Documents/GitHub/cpp-postgres/tests/test_disk_btree.cpp)
+**Citations**: [include/pg/disk_btree.h:1-125](file:///c:/Users/jerie/Documents/GitHub/cpp-postgres/include/pg/disk_btree.h), [src/disk_btree.cpp:1-400](file:///c:/Users/jerie/Documents/GitHub/cpp-postgres/src/disk_btree.cpp), [tests/test_disk_btree.cpp:1-200](file:///c:/Users/jerie/Documents/GitHub/cpp-postgres/tests/test_disk_btree.cpp)
 
 ---
 
 ## 1. Disk-Resident B-Tree Architecture
+
+> **Implementation status.** As of 2026-09-05 (Finding 2.3 remediation), `DiskBTree` is now the primary secondary index used by `Engine`, replacing the in-memory multimap. It implements the abstract `Index` interface (`include/pg/index.h`), including `remove_entry()` for three-phase VACUUM index cleanup, `num_entries()`, `num_unique_keys()`, `dump()`, and dedicated buffer pool caching (`bpm_owned_`) with dirty page flushing on checkpoint and clean shutdown. $O(1)$ engine startup opens `<db_prefix>_index.db` directly without heap scanning.
 
 `DiskBTree` stores hierarchical B-Tree nodes on dedicated **8,192-byte disk pages**. Nodes split dynamically when overflowing, promoting median keys up to parent internal nodes.
 

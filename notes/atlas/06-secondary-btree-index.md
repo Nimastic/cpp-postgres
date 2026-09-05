@@ -7,6 +7,8 @@
 
 ## 1. Index Decoupling & Multi-Version Addressing
 
+> **Implementation status.** `Engine` originally used the in-memory `BTreeIndex` multimap shown in this chapter, rebuilding it by full sequential scan of the heap on startup. Following the architecture audit (Finding 2.3), `Engine` was rewired to use `DiskBTree` (Chapter 14) directly via the abstract `Index` interface (`include/pg/index.h`), achieving on-disk persistence, buffer pool caching, VACUUM index pruning, and $O(1)$ startup.
+
 In PostgreSQL, **every** index is a secondary index — there is no clustered/primary storage — and an index entry maps a key to a heap $\text{CTID}$. Critically, an index tuple carries **no MVCC header**: no `xmin`, no `xmax`. This is the property that forces the heap dereference in §2.
 
 Two corrections to the stronger form of that claim:

@@ -25,7 +25,7 @@ items. Regression coverage lives in `tests/test_recovery.cpp` and
 | 1.5 | VACUUM bypassed the pool | **Fixed** | `Vacuum::run` works through `PinnedPage`; a relation has exactly one pool |
 | 2.1 | One transaction engine-wide | **Fixed** | `Session`; `Engine::execute(sql, Session&)`; one session per connection |
 | 2.2 | No lock manager | **Fixed (basic)** | `LockManager` serialises row writers and reports conflicts |
-| 2.3 | Index is a `std::multimap` | **Open** | `DiskBTree` still not wired into `Engine` |
+| 2.3 | Index is a `std::multimap` | **Fixed** | `DiskBTree` wired into `Engine`; `Index` interface; `remove_entry` in `Vacuum`; buffer pool caching; $O(1)$ startup |
 | 2.4 | Copy-in/copy-out buffer pool | **Fixed** | `Page` is a view over the frame; `PinnedPage` holds the pin across read-modify-write |
 | 2.5 | No executor | **Partly** | scans filter as they go instead of materialising the table; still no plan tree |
 | 2.6 | No free space map | **Partly** | inserts search back for a page with room, so reclaimed space is reusable; no `_fsm` fork |
@@ -149,9 +149,14 @@ MVCC removes the need for *read* locks. It does not remove the need for write-wr
 
 `include/pg/btree.h:52` — `std::multimap<index_key_t, CTID> tree_;`
 
-The entire `DiskBTree` subsystem (Item 14 in the atlas — ~12 KB of source, disk pages, node splits, sibling pointers) is **not referenced by `Engine` at all**. `Engine`'s member is `BTreeIndex index_` (`include/pg/engine.h:75`), the in-memory multimap.
+The entire `DiskBTree` subsystem (Item 14 in the atlas — ~12 KB of source, disk pages, node splits, sibling pointers) was originally not referenced by `Engine` at all. `Engine`'s member was `BTreeIndex index_`, the in-memory multimap, which rebuilt itself on startup by sequential scan of the heap.
 
-It has no persistence. `Engine::Engine()` rebuilds it by full sequential scan of the heap on every startup (`src/engine.cpp:39-43`). So index "durability" is an O(table) table scan, which is precisely what an index exists to avoid.
+**Resolution (Fixed)**: Wired `DiskBTree` directly into `Engine` via an abstract `Index` interface (`include/pg/index.h`). `DiskBTree` now implements:
+1. `remove_entry()` for VACUUM Phase 2 index pruning before `LP_DEAD` line pointers are released.
+2. `num_entries()` and `num_unique_keys()` by leaf-level traversal.
+3. `dump()` diagnostic formatting.
+4. Dedicated buffer pool caching (`bpm_owned_`) with dirty page writeback and `flush()` on checkpoint and shutdown.
+5. $O(1)$ instant engine startup from `<db_prefix>_index.db` without scanning the heap.
 
 ### 2.4 The buffer pool is a copy-in/copy-out cache, not a buffer pool
 

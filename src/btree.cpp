@@ -8,6 +8,10 @@ void BTreeIndex::insert_entry(index_key_t key, const CTID& ctid) {
     tree_.insert({key, ctid});
 }
 
+std::vector<CTID> BTreeIndex::find_entries(index_key_t key) {
+    return static_cast<const BTreeIndex*>(this)->find_entries(key);
+}
+
 std::vector<CTID> BTreeIndex::find_entries(index_key_t key) const {
     std::vector<CTID> results;
     auto range = tree_.equal_range(key);
@@ -40,6 +44,10 @@ size_t BTreeIndex::num_unique_keys() const {
     return keys.size();
 }
 
+std::vector<std::pair<index_key_t, CTID>> BTreeIndex::range_scan(index_key_t min_key, index_key_t max_key) {
+    return static_cast<const BTreeIndex*>(this)->range_scan(min_key, max_key);
+}
+
 std::vector<std::pair<index_key_t, CTID>> BTreeIndex::range_scan(index_key_t min_key, index_key_t max_key) const {
     std::vector<std::pair<index_key_t, CTID>> results;
     auto it_low = tree_.lower_bound(min_key);
@@ -67,16 +75,29 @@ std::string BTreeIndex::dump() const {
 }
 
 std::optional<std::pair<CTID, HeapTuple>> index_lookup(
+    Index& index,
+    HeapFile& heap,
+    index_key_t key,
+    const Snapshot& snapshot,
+    const TransactionManager& tm
+) {
+    std::vector<CTID> candidate_ctids = index.find_entries(key);
+    for (const auto& root_ctid : candidate_ctids) {
+        auto hit = heap.hot_search(root_ctid, snapshot, tm);
+        if (hit.has_value()) {
+            return hit;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::pair<CTID, HeapTuple>> index_lookup(
     const BTreeIndex& index,
     HeapFile& heap,
     index_key_t key,
     const Snapshot& snapshot,
     const TransactionManager& tm
 ) {
-    // The index answers with candidate CTIDs and nothing else: index tuples
-    // carry no xmin/xmax, so visibility can only be settled against the heap.
-    // Each candidate is the root of a HOT chain, which the heap knows how to
-    // walk (including through an LP_REDIRECT left by pruning).
     std::vector<CTID> candidate_ctids = index.find_entries(key);
     for (const auto& root_ctid : candidate_ctids) {
         auto hit = heap.hot_search(root_ctid, snapshot, tm);

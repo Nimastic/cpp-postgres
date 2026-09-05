@@ -34,6 +34,7 @@ Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
     heap_ = HeapFile::open(db_prefix_ + "_heap.db");
     wal_ = WALManager::open(db_prefix_ + "_wal.log");
     toast_ = ToastManager::open(db_prefix_ + "_toast.db");
+    index_ = DiskBTree::open(db_prefix_ + "_index.db");
 
     // One pool per relation. The heap made its own on construction and the
     // engine adopts it rather than building a second one over the same file:
@@ -63,16 +64,15 @@ Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
         }
     }
 
-    // Rebuild the in-memory index from the heap. A disk-resident index would
-    // not need this; see notes/2026-08-27-architecture-audit.md item 2.3.
-    auto all_rows = heap_->seq_scan();
-    tx_id_t max_xid = 0;
-    for (const auto& [ctid, tuple] : all_rows) {
-        index_.insert_entry(tuple.data.item_id, ctid);
-        max_xid = std::max(max_xid, std::max(tuple.header.xmin, tuple.header.xmax));
-    }
-    if (max_xid >= tm_.next_tx_id()) {
-        tm_.set_next_tx_id(max_xid + 1);
+    // On-disk B-Tree index is persistent. If the index file already has pages,
+    // we open it in O(1) time without scanning the heap (resolving audit finding 2.3).
+    // If the index was just created (has 0 entries) but the heap has tuples,
+    // populate the index from the heap.
+    if (index_->num_entries() == 0 && heap_->num_pages() > 0) {
+        auto all_rows = heap_->seq_scan();
+        for (const auto& [ctid, tuple] : all_rows) {
+            index_->insert_entry(tuple.data.item_id, ctid);
+        }
     }
 
     control_->data().next_xid = tm_.next_tx_id();
@@ -83,6 +83,9 @@ Engine::~Engine() {
     try {
         // A clean shutdown: get everything onto disk, then record that it is on
         // disk. Marking first would let a crash in between look clean.
+        if (index_) {
+            index_->flush();
+        }
         if (heap_ && heap_->bpm()) {
             heap_->bpm()->flush_all();
             heap_->pager().sync();
@@ -173,7 +176,7 @@ std::string Engine::insert_item(int32_t item_id, int32_t price) {
     CTID ctid = heap_->insert({item_id, price}, tx_id);
     lsn_t lsn = wal_->current_lsn();
 
-    index_.insert_entry(item_id, ctid);
+    index_->insert_entry(item_id, ctid);
 
     std::ostringstream oss;
     oss << "[Tx " << tx_id << "] INSERT: Landed at CTID " << ctid.to_string() 
@@ -208,7 +211,7 @@ std::string Engine::insert_item_with_doc(int32_t item_id, int32_t price, const s
 
     lsn_t lsn = wal_->current_lsn();
 
-    index_.insert_entry(item_id, ctid);
+    index_->insert_entry(item_id, ctid);
 
     std::ostringstream oss;
     oss << "[Tx " << tx_id << "] INSERT (WITH TOAST): Landed at CTID " << ctid.to_string() 
@@ -229,7 +232,7 @@ std::string Engine::insert_item_with_doc(int32_t item_id, int32_t price, const s
 
 std::string Engine::select_doc_by_id(int32_t item_id) {
     ensure_transaction(true);
-    auto visible_opt = index_lookup(index_, *heap_, item_id, *sess_->snapshot, tm_);
+    auto visible_opt = index_lookup(*index_, *heap_, item_id, *sess_->snapshot, tm_);
     if (!visible_opt.has_value()) {
         return "[SELECT] No visible row found with item_id=" + std::to_string(item_id) + ".\n";
     }
@@ -257,7 +260,7 @@ std::string Engine::update_item(int32_t item_id, int32_t new_price) {
     ensure_transaction();
 
     // 1. Locate current visible tuple via B-Tree index
-    auto visible_opt = index_lookup(index_, *heap_, item_id, *sess_->snapshot, tm_);
+    auto visible_opt = index_lookup(*index_, *heap_, item_id, *sess_->snapshot, tm_);
     if (!visible_opt.has_value()) {
         if (autocommit) commit_transaction();
         return "[Tx " + std::to_string(tx_id) + "] UPDATE: No visible row found with item_id=" + std::to_string(item_id) + ".\n";
@@ -300,7 +303,7 @@ std::string Engine::update_item(int32_t item_id, int32_t new_price) {
         CTID new_ctid = heap_->update(old_ctid, {item_id, new_price}, tx_id);
         lsn_t lsn = wal_->current_lsn();
 
-        index_.insert_entry(item_id, new_ctid);
+        index_->insert_entry(item_id, new_ctid);
         oss << "[Tx " << tx_id << "] UPDATE: Standard update placed at " 
             << new_ctid.to_string() << " (WAL LSN: " << lsn 
             << "). B-Tree index entry added.\n";
@@ -338,7 +341,7 @@ std::string Engine::select_by_id(int32_t item_id) {
     }
 
     ensure_transaction();
-    auto visible_opt = index_lookup(index_, *heap_, item_id, *sess_->snapshot, tm_);
+    auto visible_opt = index_lookup(*index_, *heap_, item_id, *sess_->snapshot, tm_);
 
     std::vector<std::pair<CTID, HeapTuple>> results;
     if (visible_opt.has_value()) {
@@ -357,7 +360,7 @@ std::string Engine::select_by_id(int32_t item_id) {
 std::string Engine::vacuum() {
     // The index is passed in so phase 2 can remove entries pointing at the
     // slots phase 1 flagged. Without it those slots can never be safely freed.
-    auto stats = Vacuum::run(*heap_, tm_, index_);
+    auto stats = Vacuum::run(*heap_, tm_, *index_);
 
     std::ostringstream oss;
     oss << "[VACUUM] Garbage collection complete (horizon oldest_snapshot_xmin=" << tm_.oldest_snapshot_xmin() 
@@ -432,7 +435,7 @@ std::string Engine::status() {
     oss << "Total Heap Pages : " << heap_->num_pages() << " (File size: " << (heap_->num_pages() * 8) << " KB)\n";
     oss << "Buffer Pool Size : " << bpm().pool_size() << " frames (" << bpm().resident_pages() << " resident in RAM)\n";
     oss << "WAL Flushed LSN  : " << wal_->flushed_lsn() << " bytes\n";
-    oss << "Index Entries    : " << index_.num_entries() << " candidate CTIDs\n";
+    oss << "Index Entries    : " << index_->num_entries() << " candidate CTIDs\n";
     oss << "============================================================\n";
     return oss.str();
 }
@@ -593,6 +596,13 @@ std::string Engine::execute(const std::string& sql) {
 }
 
 std::string Engine::checkpoint() {
+    if (index_) {
+        index_->flush();
+    }
+    if (heap_ && heap_->bpm()) {
+        heap_->bpm()->flush_all();
+        heap_->pager().sync();
+    }
     lsn_t lsn = wal_->log_checkpoint();
     std::ostringstream oss;
     oss << "[CHECKPOINT] All dirty buffer pool frames flushed to disk. Checkpoint record logged at LSN: " 

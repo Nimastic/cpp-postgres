@@ -1,4 +1,5 @@
 #include "pg/disk_btree.h"
+#include "pg/engine.h"
 #include <iostream>
 #include <vector>
 #include <cassert>
@@ -114,7 +115,97 @@ void run_disk_btree_tests() {
         std::cout << " -> Multi-version candidate accumulation verified (2 CTIDs returned for key 7777).\n";
     }
 
+    // =========================================================================
+    // TEST 6: Removal of Entries (VACUUM Phase 2 Index Pruning)
+    // =========================================================================
+    std::cout << "\n[Step 6] Testing entry removal (remove_entry) for VACUUM pruning..." << std::endl;
+    {
+        auto tree = pg::DiskBTree::open(btree_db);
+
+        size_t initial_entries = tree->num_entries();
+        size_t initial_unique = tree->num_unique_keys();
+        std::cout << " -> Initial entries: " << initial_entries << ", unique keys: " << initial_unique << "\n";
+
+        // Remove one of the duplicate entries for 7777
+        bool removed1 = tree->remove_entry(7777, pg::CTID(10, 1));
+        assert(removed1);
+        auto candidates_after1 = tree->find_entries(7777);
+        assert(candidates_after1.size() == 1);
+        assert(candidates_after1[0] == pg::CTID(10, 2));
+        assert(tree->num_entries() == initial_entries - 1);
+        assert(tree->num_unique_keys() == initial_unique); // 7777 still has 1 entry
+
+        // Remove the remaining entry for 7777
+        bool removed2 = tree->remove_entry(7777, pg::CTID(10, 2));
+        assert(removed2);
+        auto candidates_after2 = tree->find_entries(7777);
+        assert(candidates_after2.empty());
+        assert(tree->num_entries() == initial_entries - 2);
+        assert(tree->num_unique_keys() == initial_unique - 1); // 7777 completely removed
+
+        // Non-existent removal
+        bool removed_nonexistent = tree->remove_entry(99999, pg::CTID(0, 1));
+        assert(!removed_nonexistent);
+
+        std::cout << " -> remove_entry verified for duplicates, complete key removal, and non-existent keys.\n";
+    }
+
+    // =========================================================================
+    // TEST 7: Tree Inspection and Diagnostic Dump
+    // =========================================================================
+    std::cout << "\n[Step 7] Testing diagnostic dump()..." << std::endl;
+    {
+        auto tree = pg::DiskBTree::open(btree_db);
+        std::string dump_str = tree->dump();
+        assert(!dump_str.empty());
+        assert(dump_str.find("ON-DISK B-TREE INDEX DUMP") != std::string::npos);
+        std::cout << " -> dump() format verified.\n";
+    }
+
     fs::remove(btree_db);
+
+    // =========================================================================
+    // TEST 8: Engine Integration & On-Disk Index Persistence across Restart
+    // =========================================================================
+    std::cout << "\n[Step 8] Testing Engine integration with DiskBTree across restart..." << std::endl;
+    const std::string engine_prefix = "test_eng_btree";
+    auto cleanup_engine_files = [&]() {
+        for (const auto& ext : {"_heap.db", "_wal.log", "_toast.db", "_clog.db", "_control.db", "_index.db"}) {
+            std::string path = engine_prefix + ext;
+            if (fs::exists(path)) fs::remove(path);
+        }
+    };
+    cleanup_engine_files();
+    {
+        pg::Engine engine(engine_prefix);
+        engine.execute("INSERT INTO items VALUES (100, 10);");
+        engine.execute("INSERT INTO items VALUES (200, 20);");
+        engine.execute("INSERT INTO items VALUES (300, 30);");
+
+        assert(engine.index().num_entries() == 3);
+        assert(engine.index().num_unique_keys() == 3);
+
+        std::string res = engine.execute("SELECT * FROM items WHERE item_id = 200;");
+        assert(res.find("20") != std::string::npos);
+        assert(res.find("B-Tree Index Scan") != std::string::npos);
+    }
+    // Verify the on-disk index file was created and is non-empty
+    assert(fs::exists(engine_prefix + "_index.db"));
+    assert(fs::file_size(engine_prefix + "_index.db") >= 8192);
+
+    // Re-open Engine: it opens the on-disk B-Tree index directly without heap rebuilding!
+    {
+        pg::Engine engine(engine_prefix);
+        assert(engine.index().num_entries() == 3);
+        assert(engine.index().num_unique_keys() == 3);
+
+        std::string res = engine.execute("SELECT * FROM items WHERE item_id = 200;");
+        assert(res.find("20") != std::string::npos);
+        assert(res.find("B-Tree Index Scan") != std::string::npos);
+        std::cout << " -> Engine restarted: on-disk B-Tree index preserved entries and served point query.\n";
+    }
+    cleanup_engine_files();
+
     std::cout << "\n>>> ITEM 14 (DISK-RESIDENT B-TREE WITH PAGE SPLITS) TESTS PASSED SUCCESSFULLY! <<<\n" << std::endl;
 }
 

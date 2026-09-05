@@ -2,6 +2,7 @@
 
 #include "pg/heap.h"
 #include "pg/tx.h"
+#include "pg/index.h"
 #include "pg/btree.h"
 #include <cstddef>
 #include <vector>
@@ -33,9 +34,14 @@ public:
     // Vacuum the heap and every index given. Passing no index is only correct
     // for a table that truly has none.
     static VacuumStats run(HeapFile& heap, const TransactionManager& tm,
-                           const std::vector<BTreeIndex*>& indexes = {});
+                           const std::vector<Index*>& indexes = {});
 
     // Convenience overload for a single index.
+    static VacuumStats run(HeapFile& heap, const TransactionManager& tm, Index& index);
+
+    // Backwards-compatible overloads for legacy BTreeIndex callers
+    static VacuumStats run(HeapFile& heap, const TransactionManager& tm,
+                           const std::vector<BTreeIndex*>& indexes);
     static VacuumStats run(HeapFile& heap, const TransactionManager& tm, BTreeIndex& index);
 
 private:

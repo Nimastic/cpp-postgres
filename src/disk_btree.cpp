@@ -1,5 +1,6 @@
 #include "pg/disk_btree.h"
 #include <iostream>
+#include <sstream>
 #include <vector>
 #include <stdexcept>
 #include <cassert>
@@ -9,6 +10,11 @@ namespace pg {
 DiskBTree::DiskBTree(std::unique_ptr<Pager> pager, BufferPoolManager* bpm)
     : pager_(std::move(pager)), bpm_(bpm)
 {
+    if (pager_ && bpm_ == nullptr) {
+        bpm_owned_ = std::make_unique<BufferPoolManager>(*pager_, 16);
+        bpm_ = bpm_owned_.get();
+    }
+
     if (pager_ && pager_->num_pages() == 0) {
         // Initialize Page 0 as initial Leaf + Root node
         page_id_t root_pid = pager_->allocate_page();
@@ -38,12 +44,29 @@ DiskBTree::DiskBTree(std::unique_ptr<Pager> pager, BufferPoolManager* bpm)
     }
 }
 
+DiskBTree::~DiskBTree() {
+    try {
+        flush();
+    } catch (...) {
+        // Destructor must never throw
+    }
+}
+
 std::unique_ptr<DiskBTree> DiskBTree::open(const std::string& filepath, BufferPoolManager* bpm) {
     auto pager = Pager::open(filepath);
     return std::make_unique<DiskBTree>(std::move(pager), bpm);
 }
 
-void DiskBTree::read_page(page_id_t page_id, void* buffer) {
+void DiskBTree::flush() {
+    if (bpm_owned_) {
+        bpm_owned_->flush_all();
+    }
+    if (pager_) {
+        pager_->sync();
+    }
+}
+
+void DiskBTree::read_page(page_id_t page_id, void* buffer) const {
     if (bpm_) {
         Page* p = bpm_->fetch_page(page_id);
         if (p) {
@@ -67,7 +90,7 @@ void DiskBTree::write_page(page_id_t page_id, const void* buffer) {
     pager_->write_page(page_id, buffer);
 }
 
-page_id_t DiskBTree::find_leaf_page(index_key_t key) {
+page_id_t DiskBTree::find_leaf_page(index_key_t key) const {
     page_id_t curr_pid = root_page_id_;
     std::vector<uint8_t> page_buf(PAGE_SIZE, 0);
 
@@ -349,6 +372,113 @@ std::vector<std::pair<index_key_t, CTID>> DiskBTree::range_scan(index_key_t min_
     }
 
     return results;
+}
+
+page_id_t DiskBTree::leftmost_leaf_page() const {
+    page_id_t curr = root_page_id_;
+    std::vector<uint8_t> page_buf(PAGE_SIZE, 0);
+
+    while (true) {
+        read_page(curr, page_buf.data());
+        auto* header = reinterpret_cast<const BTreePageHeader*>(page_buf.data());
+        if (header->level == 0 || (header->flags & BTREE_LEAF)) {
+            return curr;
+        }
+        auto* entries = reinterpret_cast<const BTreeInternalEntry*>(page_buf.data() + sizeof(BTreePageHeader));
+        if (header->num_keys == 0) return curr;
+        curr = entries[0].child_page_id;
+    }
+}
+
+bool DiskBTree::remove_entry(index_key_t key, const CTID& ctid) {
+    page_id_t leaf_pid = find_leaf_page(key);
+    std::vector<uint8_t> page_buf(PAGE_SIZE, 0);
+
+    while (leaf_pid != INVALID_PAGE_ID) {
+        read_page(leaf_pid, page_buf.data());
+        auto* header = reinterpret_cast<BTreePageHeader*>(page_buf.data());
+        auto* entries = reinterpret_cast<BTreeLeafEntry*>(page_buf.data() + sizeof(BTreePageHeader));
+
+        bool past_key = false;
+        for (uint16_t i = 0; i < header->num_keys; ++i) {
+            if (entries[i].key == key && entries[i].ctid == ctid) {
+                for (uint16_t j = i; j + 1 < header->num_keys; ++j) {
+                    entries[j] = entries[j + 1];
+                }
+                header->num_keys--;
+                write_page(leaf_pid, page_buf.data());
+                return true;
+            } else if (entries[i].key > key) {
+                past_key = true;
+                break;
+            }
+        }
+
+        if (past_key) break;
+        leaf_pid = header->right_sibling;
+    }
+    return false;
+}
+
+size_t DiskBTree::num_entries() const {
+    page_id_t curr = leftmost_leaf_page();
+    std::vector<uint8_t> page_buf(PAGE_SIZE, 0);
+    size_t total = 0;
+
+    while (curr != INVALID_PAGE_ID) {
+        read_page(curr, page_buf.data());
+        auto* header = reinterpret_cast<const BTreePageHeader*>(page_buf.data());
+        total += header->num_keys;
+        curr = header->right_sibling;
+    }
+    return total;
+}
+
+size_t DiskBTree::num_unique_keys() const {
+    page_id_t curr = leftmost_leaf_page();
+    std::vector<uint8_t> page_buf(PAGE_SIZE, 0);
+    size_t unique_count = 0;
+    bool first = true;
+    index_key_t prev_key = 0;
+
+    while (curr != INVALID_PAGE_ID) {
+        read_page(curr, page_buf.data());
+        auto* header = reinterpret_cast<const BTreePageHeader*>(page_buf.data());
+        auto* entries = reinterpret_cast<const BTreeLeafEntry*>(page_buf.data() + sizeof(BTreePageHeader));
+
+        for (uint16_t i = 0; i < header->num_keys; ++i) {
+            if (first || entries[i].key != prev_key) {
+                unique_count++;
+                prev_key = entries[i].key;
+                first = false;
+            }
+        }
+        curr = header->right_sibling;
+    }
+    return unique_count;
+}
+
+std::string DiskBTree::dump() const {
+    std::ostringstream oss;
+    oss << "================== ON-DISK B-TREE INDEX DUMP ==================\n";
+    oss << "Root Page ID: " << root_page_id_ << ", Total Disk Pages: " << pager_->num_pages() << "\n";
+    oss << "Total Entries: " << num_entries() << ", Unique Keys: " << num_unique_keys() << "\n";
+
+    page_id_t curr = leftmost_leaf_page();
+    std::vector<uint8_t> page_buf(PAGE_SIZE, 0);
+    while (curr != INVALID_PAGE_ID) {
+        read_page(curr, page_buf.data());
+        auto* header = reinterpret_cast<const BTreePageHeader*>(page_buf.data());
+        auto* entries = reinterpret_cast<const BTreeLeafEntry*>(page_buf.data() + sizeof(BTreePageHeader));
+        oss << "  Leaf Page " << curr << " (" << header->num_keys << " keys, next: " 
+            << (header->right_sibling == INVALID_PAGE_ID ? "none" : std::to_string(header->right_sibling)) << "):\n";
+        for (uint16_t i = 0; i < header->num_keys; ++i) {
+            oss << "    [" << entries[i].key << "] -> " << entries[i].ctid.to_string() << "\n";
+        }
+        curr = header->right_sibling;
+    }
+    oss << "===============================================================\n";
+    return oss.str();
 }
 
 } // namespace pg

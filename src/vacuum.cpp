@@ -94,13 +94,25 @@ size_t Vacuum::reclaim(Page& page) {
     return freed;
 }
 
-VacuumStats Vacuum::run(HeapFile& heap, const TransactionManager& tm, BTreeIndex& index) {
-    std::vector<BTreeIndex*> one{&index};
+VacuumStats Vacuum::run(HeapFile& heap, const TransactionManager& tm, Index& index) {
+    std::vector<Index*> one{&index};
     return run(heap, tm, one);
+}
+
+VacuumStats Vacuum::run(HeapFile& heap, const TransactionManager& tm, BTreeIndex& index) {
+    Index& idx = index;
+    return run(heap, tm, idx);
 }
 
 VacuumStats Vacuum::run(HeapFile& heap, const TransactionManager& tm,
                         const std::vector<BTreeIndex*>& indexes) {
+    std::vector<Index*> idxs;
+    for (auto* idx : indexes) idxs.push_back(idx);
+    return run(heap, tm, idxs);
+}
+
+VacuumStats Vacuum::run(HeapFile& heap, const TransactionManager& tm,
+                        const std::vector<Index*>& indexes) {
     // The cutoff is the oldest snapshot horizon in the system, not the oldest
     // running transaction id. A transaction that started long ago still holds a
     // snapshot that may need row versions deleted by transactions numbered
@@ -138,7 +150,7 @@ VacuumStats Vacuum::run(HeapFile& heap, const TransactionManager& tm,
 
     // ---- Phase 2: clean the indexes --------------------------------------
     // Until this completes, none of the flagged slots may be reused.
-    for (BTreeIndex* index : indexes) {
+    for (Index* index : indexes) {
         if (index == nullptr) continue;
         for (const auto& [key, ctid] : dead_tids) {
             if (index->remove_entry(key, ctid)) {
