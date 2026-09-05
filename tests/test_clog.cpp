@@ -129,13 +129,88 @@ void run_clog_tests() {
         std::cout << " -> MVCC Visibility verified purely via on-disk CLOG bitmap without WAL replay!\n";
     }
 
+    // =========================================================================
+    // TEST 4: SLRU Cache Hits, Misses, Dirty Frames & LRU Eviction Writeback
+    // =========================================================================
+    std::cout << "\n[Step 6] Testing SLRU shared buffer pool (Hits, Misses, LRU Eviction)..." << std::endl;
+    const std::string slru_db = "test_clog_slru.db";
+    if (fs::exists(slru_db)) fs::remove(slru_db);
+
+    {
+        // Open with only 4 SLRU frames to test eviction under pressure
+        auto clog = pg::CLogManager::open(slru_db, 4);
+        assert(clog->num_buffers() == 4);
+
+        // Access 4 different pages:
+        // tx 0 -> page 0
+        // tx 32,768 -> page 1
+        // tx 65,536 -> page 2
+        // tx 98,304 -> page 3
+        clog->set_status(0, pg::TransactionStatus::COMMITTED);
+        clog->set_status(32768, pg::TransactionStatus::ABORTED);
+        clog->set_status(65536, pg::TransactionStatus::COMMITTED);
+        clog->set_status(98304, pg::TransactionStatus::COMMITTED);
+
+        assert(clog->cache_misses() == 4);
+        assert(clog->dirty_frames() == 4);
+
+        // Read all 4 pages repeatedly -> 100% cache hits
+        for (int i = 0; i < 10; ++i) {
+            assert(clog->get_status(0) == pg::TransactionStatus::COMMITTED);
+            assert(clog->get_status(32768) == pg::TransactionStatus::ABORTED);
+            assert(clog->get_status(65536) == pg::TransactionStatus::COMMITTED);
+            assert(clog->get_status(98304) == pg::TransactionStatus::COMMITTED);
+        }
+        assert(clog->cache_hits() == 40);
+        assert(clog->cache_misses() == 4);
+        std::cout << " -> SLRU cache hit ratio verified: 40 hits / 4 misses on 4 resident pages.\n";
+
+        // Access page 4 (tx 131,072) and page 5 (tx 163,840) -> forces eviction of 2 dirty frames
+        clog->set_status(131072, pg::TransactionStatus::COMMITTED);
+        clog->set_status(163840, pg::TransactionStatus::SUB_COMMITTED);
+
+        assert(clog->cache_misses() == 6);
+        std::cout << " -> Evicted dirty frames successfully flushed during victim selection.\n";
+
+        // Flush remaining dirty frames
+        assert(clog->dirty_frames() > 0);
+        clog->flush();
+        assert(clog->dirty_frames() == 0);
+        std::cout << " -> CLogManager::flush() cleanly flushed all resident dirty frames.\n";
+    }
+
+    // Re-read all pages from disk to ensure evicted pages and flushed pages are durable
+    {
+        auto clog = pg::CLogManager::open(slru_db, 4);
+        assert(clog->get_status(0) == pg::TransactionStatus::COMMITTED);
+        assert(clog->get_status(32768) == pg::TransactionStatus::ABORTED);
+        assert(clog->get_status(65536) == pg::TransactionStatus::COMMITTED);
+        assert(clog->get_status(98304) == pg::TransactionStatus::COMMITTED);
+        assert(clog->get_status(131072) == pg::TransactionStatus::COMMITTED);
+        assert(clog->get_status(163840) == pg::TransactionStatus::SUB_COMMITTED);
+        std::cout << " -> All 6 pages persisted and verified correctly across SLRU evictions!\n";
+    }
+
+    // High throughput test: 10,000 commits in memory
+    {
+        auto clog = pg::CLogManager::open(slru_db, 32);
+        for (pg::tx_id_t tx = 1000; tx < 11000; ++tx) {
+            clog->set_status(tx, pg::TransactionStatus::COMMITTED);
+        }
+        // Since 1000..10999 is all within Page 0 (0..32767), this should result in exactly 1 miss and 9999 hits!
+        assert(clog->cache_misses() == 1);
+        assert(clog->cache_hits() == 9999);
+        std::cout << " -> High throughput test passed: 10,000 commits achieved with 1 page miss and 9,999 cache hits!\n";
+    }
+
+    fs::remove(slru_db);
     fs::remove(clog_db);
     fs::remove(db_prefix + "_heap.db");
     fs::remove(db_prefix + "_wal.log");
     fs::remove(db_prefix + "_toast.db");
     fs::remove(db_prefix + "_clog.db");
 
-    std::cout << "\n>>> ITEM 13 (CLOG / COMMIT STATUS BITMAP) TESTS PASSED SUCCESSFULLY! <<<\n" << std::endl;
+    std::cout << "\n>>> ITEM 22 / FINDING 2.8 (CLOG SLRU CACHE) TESTS PASSED SUCCESSFULLY! <<<\n" << std::endl;
 }
 
 int main() {

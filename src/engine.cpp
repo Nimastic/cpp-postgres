@@ -92,6 +92,9 @@ Engine::~Engine() {
         if (heap_) {
             heap_->flush();
         }
+        if (clog_) {
+            clog_->flush();
+        }
         if (wal_) {
             wal_->flush();
         }
@@ -606,6 +609,9 @@ std::string Engine::checkpoint() {
     }
     if (heap_) {
         heap_->flush();
+    }
+    if (clog_) {
+        clog_->flush();
     }
     lsn_t lsn = wal_->log_checkpoint();
     std::ostringstream oss;

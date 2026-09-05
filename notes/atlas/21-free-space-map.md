@@ -13,12 +13,12 @@ PostgreSQL solves this with the **Free Space Map (FSM)** companion fork (`<relfi
 
 ```mermaid
 flowchart TD
-    subgraph FsmTree["8KB FSM Page (Complete Binary Max-Heap)"]
-        ROOT["Root Node (Index 0)\n[Max Category: 218 (~6,976 B)]"]
-        L1["Left Node (Index 1)\n[Pages 0-2047 Max: 218]"]
-        R1["Right Node (Index 2)\n[Pages 2048-4095 Max: 32]"]
-        LEAF0["Leaf 4095 (Heap Page 0)\nCategory 218 (Freed by VACUUM)"]
-        LEAF1["Leaf 4096 (Heap Page 1)\nCategory 2 (Full)"]
+    subgraph FsmTree["8KB FSM Page Complete Binary Max-Heap"]
+        ROOT["Root Node 0: Max Category 218"]
+        L1["Left Node 1: Pages 0-2047 Max 218"]
+        R1["Right Node 2: Pages 2048-4095 Max 32"]
+        LEAF0["Leaf 4095 Heap Page 0: Category 218"]
+        LEAF1["Leaf 4096 Heap Page 1: Category 2"]
     end
 
     ROOT --> L1
@@ -26,8 +26,8 @@ flowchart TD
     L1 -.-> LEAF0
     L1 -.-> LEAF1
 
-    INSERT["HeapFile::insert(tuple, 28B)\nNeeded Category: 1"]
-    INSERT -->|O(log M) Search| ROOT
+    INSERT["Insert Tuple 28 Bytes: Needed Category 1"]
+    INSERT -->|Binary Search| ROOT
     ROOT -->|Descent| LEAF0
     LEAF0 -->|Allocate Tuple| HEAP0["Target Heap Page 0"]
 ```
@@ -76,25 +76,25 @@ sequenceDiagram
     participant Page0 as Heap Page 0
     participant VAC as Vacuum
 
-    Note over Engine,Page0: 1. Initial State: Page 0 is full (Category 0)
-    Engine->>Heap: insert(record)
-    Heap->>FSM: search_page(needed=28B)
+    Note over Engine,Page0: 1. Initial State: Page 0 is full
+    Engine->>Heap: insert record
+    Heap->>FSM: search_page needed=28B
     FSM-->>Heap: No page with room in Page 0 range
-    Heap->>BPM: new_page() -> Heap Page 1
-    Heap->>FSM: update_page(pid=1, free=8128)
+    Heap->>BPM: new_page
+    Heap->>FSM: update_page pid=1, free=8128
 
-    Note over VAC,Page0: 2. Tuples deleted on Page 0; VACUUM runs
-    VAC->>Page0: defragment() -> Reclaimed 291 tuples
-    VAC->>FSM: update_page(pid=0, free=6976)
+    Note over VAC,Page0: 2. Tuples deleted on Page 0, VACUUM runs
+    VAC->>Page0: defragment
+    VAC->>FSM: update_page pid=0, free=6976
     Note over FSM: Category 218 bubbled up to root of FSM Page 0
 
     Note over Engine,Page0: 3. Next INSERT instantly reuses Page 0
-    Engine->>Heap: insert(record)
-    Heap->>FSM: search_page(needed=28B)
-    FSM-->>Heap: Target Heap Page 0! (O(log M) search)
-    Heap->>Page0: insert_tuple(slot=1)
-    Heap->>FSM: update_page(pid=0, free=6944)
-    Heap-->>Engine: CTID (0, 1) (Reused without file growth!)
+    Engine->>Heap: insert record
+    Heap->>FSM: search_page needed=28B
+    FSM-->>Heap: Target Heap Page 0
+    Heap->>Page0: insert_tuple slot=1
+    Heap->>FSM: update_page pid=0, free=6944
+    Heap-->>Engine: CTID 0-1 reused
 ```
 
 ---

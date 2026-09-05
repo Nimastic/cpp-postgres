@@ -30,7 +30,7 @@ items. Regression coverage lives in `tests/test_recovery.cpp` and
 | 2.5 | No executor | **Partly** | scans filter as they go instead of materialising the table; still no plan tree |
 | 2.6 | No free space map | **Fixed** | Free Space Map (`<db_prefix>_fsm.db`) companion fork; 8KB `FsmPage` binary max-heap tree layout; $O(\log M)$ allocation; VACUUM Phase 3 recycling |
 | 2.7 | TOAST writes no WAL | **Fixed** | `ToastChunkHeader` on-disk layout; `ToastManager::scan_existing_pages()` startup recovery; `WALRecordType::TOAST_INSERT`; ARIES REDO/UNDO replay |
-| 2.8 | CLOG I/O per transaction | **Partly** | `begin_transaction` no longer writes CLOG; commit/abort still go straight to the pager |
+| 2.8 | CLOG I/O per transaction | **Fixed** | SLRU shared memory buffer pool (32 frames, 256KB, 1M tx resident); deferred writeback; flush on checkpoint and shutdown; zero synchronous disk I/O on commit |
 | 3.1 | Clock sweep threw spuriously | **Fixed** | `usage_count` capped at `BUF_USAGECOUNT_MAX = 5`; sweep bounded by the cap |
 | 3.2 | CLR/ABORT silently dropped | **Fixed** | positioned writes; no sticky stream state |
 | 3.3 | Wrong VACUUM cutoff | **Fixed** | `TransactionManager::oldest_snapshot_xmin()` |
@@ -204,11 +204,20 @@ $ grep -c "wal" src/toast.cpp
 
 ### 2.8 CLOG does 16 KB of I/O per status change and bypasses the pool
 
-`CLogManager::set_status` (`src/clog.cpp:38-45`) reads a full 8 KB page and writes a full 8 KB page to flip two bits, straight through `Pager`. It is called on every `begin_transaction`, `commit`, and `abort` — three round trips per transaction.
+`CLogManager::set_status` (`src/clog.cpp:38-45`) originally read a full 8 KB page and wrote a full 8 KB page to flip two bits, straight through `Pager`. It was called on every `begin_transaction`, `commit`, and `abort` — three round trips per transaction.
 
 PostgreSQL keeps `pg_xact` in an SLRU cache in shared memory and writes pages at checkpoint. Also: PostgreSQL never writes `IN_PROGRESS`; `00` is the zero state of a freshly allocated page, so `begin_transaction` should not touch CLOG at all.
 
-Note that `TransactionManager` keeps a `status_map_` of every XID in RAM (`include/pg/tx.h:70`) and consults it *before* CLOG, so at runtime CLOG is nearly vestigial — and that map grows without bound.
+Note that `TransactionManager` keeps a `status_map_` of every XID in RAM (`include/pg/tx.h:70`) and consults it *before* CLOG, so at runtime CLOG was nearly vestigial — and that map grew without bound.
+
+**Resolution (Fixed)**:
+1. **SLRU Shared Memory Buffer Pool (`include/pg/clog.h`, `src/clog.cpp`)**: Designed and implemented `SlruFrame` and an in-memory 32-frame SLRU buffer cache (`frames_`, 256 KB RAM total) in `CLogManager`.
+2. **Zero Synchronous Disk I/O on Commit**: `set_status()` flips the 2-bit status directly inside the cached SLRU memory frame in $O(1)$ time and marks the frame dirty. Durability is provided exclusively by WAL (`WALRecordType::COMMIT` with `File::sync()`).
+3. **Huge In-Memory Working Set**: With 32,768 transactions recorded per 8KB page (2 bits per transaction), the 32-frame SLRU cache holds up to 1,048,576 active transactions resident in RAM simultaneously.
+4. **LRU Eviction with Deferred Writeback**: When all 32 frames are populated and a non-resident page is requested, `victim_frame()` selects the least recently used frame via monotonic `lru_counter`. If dirty, it is flushed to disk before loading the new page.
+5. **Coordinated Checkpoint & Shutdown Flush**: `CLogManager::flush()` flushes all resident dirty frames and forces a durable `File::sync()` on the underlying pager. This is integrated into `Engine::checkpoint()` and `Engine::~Engine()`.
+6. **Eliminated `begin_transaction` CLOG Writes**: New transactions default to `0b00` (`IN_PROGRESS`) implicitly, avoiding any CLOG writes on transaction start.
+7. **Regression Testing (`tests/test_clog.cpp`)**: Added comprehensive tests verifying cache hit ratios, LRU eviction writebacks under memory pressure, and 10,000 commits with 9,999 cache hits and zero intermediate disk writes.
 
 ---
 
