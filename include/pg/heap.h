@@ -6,6 +6,7 @@
 #include "pg/tx.h"
 #include "pg/mvcc.h"
 #include "pg/buffer_pool.h"
+#include "pg/fsm.h"
 #include <memory>
 #include <vector>
 #include <optional>
@@ -19,7 +20,7 @@ class WALManager;
 
 class HeapFile {
 public:
-    explicit HeapFile(std::unique_ptr<Pager> pager, BufferPoolManager* bpm = nullptr);
+    explicit HeapFile(std::unique_ptr<Pager> pager, BufferPoolManager* bpm = nullptr, const std::string& fsm_path = "");
     ~HeapFile() = default;
 
     // Disable copy
@@ -31,7 +32,7 @@ public:
     HeapFile& operator=(HeapFile&&) noexcept = default;
 
     // Factory method
-    static std::unique_ptr<HeapFile> open(const std::string& filepath, BufferPoolManager* bpm = nullptr);
+    static std::unique_ptr<HeapFile> open(const std::string& filepath, BufferPoolManager* bpm = nullptr, const std::string& fsm_path = "");
 
     // Insert a new ItemRecord into the heap. Returns the assigned CTID.
     // If all existing pages are full, a new 8KB page is automatically allocated.
@@ -96,8 +97,15 @@ public:
     void set_wal(WALManager* wal) { wal_ = wal; }
     WALManager* wal() const { return wal_; }
 
+    // Free Space Map (FSM) companion fork access
+    FreeSpaceMap& fsm() { return *fsm_; }
+    const FreeSpaceMap& fsm() const { return *fsm_; }
+
+    void flush();
+
 private:
     std::unique_ptr<Pager> pager_;
+    std::unique_ptr<FreeSpaceMap> fsm_;
     std::unique_ptr<BufferPoolManager> owned_bpm_; // Used unless a pool is injected
     BufferPoolManager* bpm_{nullptr};              // Always non-null after construction
     WALManager* wal_{nullptr};

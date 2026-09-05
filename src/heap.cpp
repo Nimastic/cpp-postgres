@@ -5,7 +5,7 @@
 
 namespace pg {
 
-HeapFile::HeapFile(std::unique_ptr<Pager> pager, BufferPoolManager* bpm)
+HeapFile::HeapFile(std::unique_ptr<Pager> pager, BufferPoolManager* bpm, const std::string& fsm_path)
     : pager_(std::move(pager)), bpm_(bpm)
 {
     if (pager_ && pager_->num_pages() == 0) {
@@ -22,6 +22,30 @@ HeapFile::HeapFile(std::unique_ptr<Pager> pager, BufferPoolManager* bpm)
         owned_bpm_ = std::make_unique<BufferPoolManager>(*pager_, DEFAULT_POOL_FRAMES);
         bpm_ = owned_bpm_.get();
     }
+
+    std::string actual_fsm_path = fsm_path;
+    if (actual_fsm_path.empty() && pager_) {
+        std::string p = pager_->filepath();
+        size_t dot = p.rfind(".db");
+        if (dot != std::string::npos) {
+            actual_fsm_path = p.substr(0, dot) + "_fsm.db";
+        } else {
+            actual_fsm_path = p + "_fsm.db";
+        }
+    }
+
+    if (!actual_fsm_path.empty()) {
+        fsm_ = FreeSpaceMap::open(actual_fsm_path);
+        // If FSM has 0 pages but heap has pages, register each heap page's free space
+        if (fsm_->num_fsm_pages() == 0 && pager_->num_pages() > 0) {
+            for (page_id_t pid = 0; pid < pager_->num_pages(); ++pid) {
+                PinnedPage page = pin(pid);
+                if (page) {
+                    fsm_->update_page(pid, page->free_space());
+                }
+            }
+        }
+    }
 }
 
 void HeapFile::set_bpm(BufferPoolManager* bpm) {
@@ -37,9 +61,21 @@ void HeapFile::set_bpm(BufferPoolManager* bpm) {
     owned_bpm_.reset();
 }
 
-std::unique_ptr<HeapFile> HeapFile::open(const std::string& filepath, BufferPoolManager* bpm) {
+std::unique_ptr<HeapFile> HeapFile::open(const std::string& filepath, BufferPoolManager* bpm, const std::string& fsm_path) {
     auto pager = Pager::open(filepath);
-    return std::make_unique<HeapFile>(std::move(pager), bpm);
+    return std::make_unique<HeapFile>(std::move(pager), bpm, fsm_path);
+}
+
+void HeapFile::flush() {
+    if (bpm_) {
+        bpm_->flush_all();
+    }
+    if (pager_) {
+        pager_->sync();
+    }
+    if (fsm_) {
+        fsm_->flush();
+    }
 }
 
 PinnedPage HeapFile::pin(page_id_t page_id) {
@@ -59,47 +95,62 @@ CTID HeapFile::insert(const ItemRecord& record, tx_id_t xmin) {
     tuple.header.infomask = 0;
     tuple.data = record;
 
-    // Find a page with room. Scanning backwards from the last page is a crude
-    // stand-in for PostgreSQL's free space map, but unlike "always use the last
-    // page" it does let space reclaimed by VACUUM be reused.
-    size_t total = pager_->num_pages();
-    for (size_t attempt = 0; attempt < total; ++attempt) {
-        page_id_t pid = static_cast<page_id_t>(total - 1 - attempt);
-        PinnedPage page = pin(pid);
-        if (!page) continue;
+    size_t needed = sizeof(HeapTuple) + sizeof(LinePointer);
 
-        if (page->free_space() < sizeof(HeapTuple) + sizeof(LinePointer)) {
-            continue;
+    // 1. Fast O(log M) search via Free Space Map
+    if (fsm_) {
+        page_id_t target_pid = fsm_->search_page(needed);
+        if (target_pid != INVALID_PAGE_ID && target_pid < pager_->num_pages()) {
+            PinnedPage page = pin(target_pid);
+            if (page && page->free_space() >= needed) {
+                maybe_log_fpi(*page, target_pid);
+                slot_id_t slot = page->insert_tuple(&tuple, sizeof(HeapTuple));
+                if (slot != INVALID_SLOT_ID) {
+                    CTID assigned(target_pid, slot);
+                    auto* mem = reinterpret_cast<HeapTuple*>(page->get_tuple_ptr_mut(slot));
+                    mem->header.t_ctid = assigned;
+
+                    if (wal_ != nullptr) {
+                        lsn_t lsn = wal_->log_insert(xmin, target_pid, slot, *mem);
+                        page->set_lsn(lsn + 1);
+                    }
+                    page.mark_dirty();
+                    fsm_->update_page(target_pid, page->free_space());
+                    return assigned;
+                }
+            }
         }
-
-        // Log first, then mutate, then stamp the page LSN -- all while the pin
-        // is held. If the order were reversed the page could reach disk ahead of
-        // the record that describes it, and recovery would have no way back.
-        maybe_log_fpi(*page, pid);
-
-        // The slot the tuple will land in has to be known before the record is
-        // written, because redo restores to that exact slot.
-        slot_id_t slot = page->insert_tuple(&tuple, sizeof(HeapTuple));
-        if (slot == INVALID_SLOT_ID) {
-            continue;
-        }
-
-        CTID assigned(pid, slot);
-        auto* mem = reinterpret_cast<HeapTuple*>(page->get_tuple_ptr_mut(slot));
-        mem->header.t_ctid = assigned;
-
-        if (wal_ != nullptr) {
-            lsn_t lsn = wal_->log_insert(xmin, pid, slot, *mem);
-            page->set_lsn(lsn + 1);
-        }
-        page.mark_dirty();
-        return assigned;
     }
 
-    // Every existing page is full: extend the relation through the pool.
+    // 2. Fallback: check last page
+    size_t total = pager_->num_pages();
+    if (total > 0) {
+        page_id_t last_pid = static_cast<page_id_t>(total - 1);
+        PinnedPage page = pin(last_pid);
+        if (page && page->free_space() >= needed) {
+            maybe_log_fpi(*page, last_pid);
+            slot_id_t slot = page->insert_tuple(&tuple, sizeof(HeapTuple));
+            if (slot != INVALID_SLOT_ID) {
+                CTID assigned(last_pid, slot);
+                auto* mem = reinterpret_cast<HeapTuple*>(page->get_tuple_ptr_mut(slot));
+                mem->header.t_ctid = assigned;
+
+                if (wal_ != nullptr) {
+                    lsn_t lsn = wal_->log_insert(xmin, last_pid, slot, *mem);
+                    page->set_lsn(lsn + 1);
+                }
+                page.mark_dirty();
+                if (fsm_) {
+                    fsm_->update_page(last_pid, page->free_space());
+                }
+                return assigned;
+            }
+        }
+    }
+
+    // 3. Every existing page is full: extend the relation through the pool.
     page_id_t new_page_id = INVALID_PAGE_ID;
     Page* fresh = bpm_->new_page(&new_page_id);
-    PinnedPage page;  // adopt the pin new_page() already took
     slot_id_t new_slot = fresh->insert_tuple(&tuple, sizeof(HeapTuple));
     if (new_slot == INVALID_SLOT_ID) {
         bpm_->unpin_page(new_page_id, true);
@@ -113,6 +164,9 @@ CTID HeapFile::insert(const ItemRecord& record, tx_id_t xmin) {
     if (wal_ != nullptr) {
         lsn_t lsn = wal_->log_insert(xmin, new_page_id, new_slot, *mem);
         fresh->set_lsn(lsn + 1);
+    }
+    if (fsm_) {
+        fsm_->update_page(new_page_id, fresh->free_space());
     }
     bpm_->unpin_page(new_page_id, true);
     return assigned;
@@ -205,6 +259,9 @@ std::optional<CTID> HeapFile::hot_update(const CTID& old_ctid, const ItemRecord&
         page->set_lsn(lsn + 1);
     }
     page.mark_dirty();
+    if (fsm_) {
+        fsm_->update_page(old_ctid.page, page->free_space());
+    }
 
     return new_ctid;
 }

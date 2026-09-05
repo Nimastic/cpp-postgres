@@ -24,6 +24,7 @@ add_library(pg_core
     src/engine.cpp
     src/clog.cpp
     src/disk_btree.cpp
+    src/fsm.cpp
     src/http_server.cpp
     src/pgwire.cpp
 )
@@ -120,6 +121,10 @@ target_link_libraries(test_http_server PRIVATE pg_core)
 # Item 19 test executable (PostgreSQL Wire Protocol Server - Approach C)
 add_executable(test_pgwire tests/test_pgwire.cpp)
 target_link_libraries(test_pgwire PRIVATE pg_core)
+
+# Item 21 test executable (Free Space Map - FSM)
+add_executable(test_fsm tests/test_fsm.cpp)
+target_link_libraries(test_fsm PRIVATE pg_core)
 
 # -----------------------------------------------------------------------------
 # PostgreSQL Native Desktop GUI Explorer (Dear ImGui + DirectX 11)

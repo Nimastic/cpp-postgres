@@ -89,9 +89,8 @@ Engine::~Engine() {
         if (toast_) {
             toast_->flush();
         }
-        if (heap_ && heap_->bpm()) {
-            heap_->bpm()->flush_all();
-            heap_->pager().sync();
+        if (heap_) {
+            heap_->flush();
         }
         if (wal_) {
             wal_->flush();
@@ -605,9 +604,8 @@ std::string Engine::checkpoint() {
     if (toast_) {
         toast_->flush();
     }
-    if (heap_ && heap_->bpm()) {
-        heap_->bpm()->flush_all();
-        heap_->pager().sync();
+    if (heap_) {
+        heap_->flush();
     }
     lsn_t lsn = wal_->log_checkpoint();
     std::ostringstream oss;

@@ -168,9 +168,11 @@ VacuumStats Vacuum::run(HeapFile& heap, const TransactionManager& tm,
         if (freed > 0) {
             stats.dead_tuples_reclaimed += freed;
             page.mark_dirty();
+            heap.fsm().update_page(pid, page->free_space());
         }
     }
 
+    heap.fsm().flush();
     return stats;
 }
 

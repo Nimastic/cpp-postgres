@@ -28,7 +28,7 @@ items. Regression coverage lives in `tests/test_recovery.cpp` and
 | 2.3 | Index is a `std::multimap` | **Fixed** | `DiskBTree` wired into `Engine`; `Index` interface; `remove_entry` in `Vacuum`; buffer pool caching; $O(1)$ startup |
 | 2.4 | Copy-in/copy-out buffer pool | **Fixed** | `Page` is a view over the frame; `PinnedPage` holds the pin across read-modify-write |
 | 2.5 | No executor | **Partly** | scans filter as they go instead of materialising the table; still no plan tree |
-| 2.6 | No free space map | **Partly** | inserts search back for a page with room, so reclaimed space is reusable; no `_fsm` fork |
+| 2.6 | No free space map | **Fixed** | Free Space Map (`<db_prefix>_fsm.db`) companion fork; 8KB `FsmPage` binary max-heap tree layout; $O(\log M)$ allocation; VACUUM Phase 3 recycling |
 | 2.7 | TOAST writes no WAL | **Fixed** | `ToastChunkHeader` on-disk layout; `ToastManager::scan_existing_pages()` startup recovery; `WALRecordType::TOAST_INSERT`; ARIES REDO/UNDO replay |
 | 2.8 | CLOG I/O per transaction | **Partly** | `begin_transaction` no longer writes CLOG; commit/abort still go straight to the pager |
 | 3.1 | Clock sweep threw spuriously | **Fixed** | `usage_count` capped at `BUF_USAGECOUNT_MAX = 5`; sweep bounded by the cap |
@@ -178,6 +178,13 @@ Real engines stream: a plan node pulls one tuple at a time, so a `SELECT ... LIM
 `HeapFile::insert` (`src/heap.cpp:60`) always targets `pager_->num_pages() - 1`, the last page, and appends a new page when that one is full. Earlier pages are never revisited.
 
 So when VACUUM frees space in page 0 of a 500-page relation, that space is unreachable forever. PostgreSQL consults the `_fsm` fork to find a page with room. Without it, VACUUM's central purpose — making space reusable — is defeated for all but the final page.
+
+**Resolution (Fixed)**:
+1. **On-Disk Binary Max-Heap Tree (`include/pg/fsm.h`)**: Defined `FsmPage` (8,192 bytes) containing an 8,191-byte complete binary tree ($2^{13} - 1$ nodes) of depth 12 with 4,096 leaves (one byte per heap page, tracking categorical free space in 32-byte quantization buckets from 0 to 255) and 4,095 internal nodes maintaining child maximums.
+2. **Companion Fork (`<db_prefix>_fsm.db`)**: `HeapFile` automatically manages its FSM companion fork.
+3. **$O(\log M)$ Search and Descent (`src/fsm.cpp`)**: `FreeSpaceMap::search_page()` tests the root category in $O(1)$ and descends to the leftmost qualifying leaf in $< 12$ binary comparisons, eliminating $O(N)$ linear page scans.
+4. **Instant Reclamation in VACUUM (`src/vacuum.cpp`)**: Phase 3 compaction registers the reclaimed free space of every compacted page into `heap.fsm()`, allowing subsequent inserts to reuse holes on earlier pages immediately.
+5. **Regression Coverage (`tests/test_fsm.cpp`)**: Unit tests verify category discretization, max-heap property, multi-page scaling across 4,096 pages, and VACUUM hole reuse.
 
 ### 2.7 TOAST writes no WAL at all
 
