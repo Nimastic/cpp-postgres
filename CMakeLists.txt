@@ -27,6 +27,7 @@ add_library(pg_core
     src/fsm.cpp
     src/executor.cpp
     src/lock.cpp
+    src/catalog.cpp
     src/http_server.cpp
     src/pgwire.cpp
 )
@@ -139,6 +140,11 @@ target_link_libraries(test_joins PRIVATE pg_core)
 # Item 25 test executable (Two-Phase Locking 2PL & Deadlock Detection)
 add_executable(test_locks tests/test_locks.cpp)
 target_link_libraries(test_locks PRIVATE pg_core)
+
+# Item 26 test executable (Dynamic Catalogs & Multi-Table DDL)
+add_executable(test_catalog tests/test_catalog.cpp)
+target_link_libraries(test_catalog PRIVATE pg_core)
+
 
 
 

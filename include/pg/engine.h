@@ -18,10 +18,12 @@
 #include "pg/control.h"
 #include "pg/session.h"
 #include "pg/executor.h"
+#include "pg/catalog.h"
 #include <string>
 #include <memory>
 #include <optional>
 #include <vector>
+#include <unordered_map>
 
 namespace pg {
 
@@ -72,6 +74,12 @@ public:
     std::string recover();
     std::string checkpoint();
 
+    // DDL & System Catalog
+    CatalogManager& catalog() { return *catalog_; }
+    std::string create_table(const std::string& name, const std::vector<ColumnDef>& columns);
+    std::string drop_table(const std::string& name);
+    std::string show_tables();
+    std::string describe_table(const std::string& name);
 
     // Direct Subsystem Access
     TransactionManager& tm() { return tm_; }
@@ -97,6 +105,14 @@ private:
     std::unique_ptr<WALManager> wal_;
     std::unique_ptr<ToastManager> toast_;
     std::unique_ptr<DiskBTree> index_; // On-disk B-Tree index on items(item_id)
+    std::unique_ptr<CatalogManager> catalog_;
+
+    struct DynamicRelation {
+        std::unique_ptr<HeapFile> heap;
+        std::unique_ptr<DiskBTree> index;
+    };
+    std::unordered_map<std::string, DynamicRelation> dynamic_relations_;
+    DynamicRelation* get_or_open_relation(const std::string& name);
 
     Session  default_session_;
     Session* sess_{&default_session_};   // The session the current statement runs for
@@ -109,5 +125,5 @@ private:
     std::string format_join_table(const std::vector<TupleTableSlot>& slots, const std::string& scan_method);
 };
 
-
 } // namespace pg
+

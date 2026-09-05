@@ -4,7 +4,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <regex>
-#include <iostream>
+#include <filesystem>
 
 namespace pg {
 
@@ -84,10 +84,21 @@ Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
 
     control_->data().next_xid = tm_.next_tx_id();
     control_->mark_in_production();
+
+    // Initialize System Catalog
+    catalog_ = std::make_unique<CatalogManager>(db_prefix_ + "_catalog.db");
+    if (!catalog_->has_table("items")) {
+        catalog_->create_table("items", {{"item_id", "INT", 4, 1}, {"price", "INT", 4, 2}},
+                               db_prefix_ + "_heap.db", db_prefix_ + "_index.db");
+    }
 }
 
 Engine::~Engine() {
     try {
+        for (auto& [name, rel] : dynamic_relations_) {
+            if (rel.index) rel.index->flush();
+            if (rel.heap) rel.heap->flush();
+        }
         // A clean shutdown: get everything onto disk, then record that it is on
         // disk. Marking first would let a crash in between look clean.
         if (index_) {
@@ -538,6 +549,118 @@ std::string Engine::format_join_table(const std::vector<TupleTableSlot>& slots, 
     return oss.str();
 }
 
+Engine::DynamicRelation* Engine::get_or_open_relation(const std::string& name) {
+    if (name == "items") {
+        return nullptr; // Default relation uses heap_ and index_ directly
+    }
+
+    auto it = dynamic_relations_.find(name);
+    if (it != dynamic_relations_.end()) {
+        return &it->second;
+    }
+
+    const TableMetadata* meta = catalog_->get_table(name);
+    if (!meta) {
+        return nullptr;
+    }
+
+    DynamicRelation rel;
+    rel.heap = HeapFile::open(meta->heap_path);
+    rel.index = DiskBTree::open(meta->index_path);
+    BufferPoolManager& pool = *rel.heap->bpm();
+    rel.heap->set_wal(wal_.get());
+    pool.set_wal(wal_.get());
+
+    dynamic_relations_[name] = std::move(rel);
+    return &dynamic_relations_[name];
+}
+
+std::string Engine::create_table(const std::string& name, const std::vector<ColumnDef>& columns) {
+    if (catalog_->has_table(name)) {
+        return "[ERROR] relation \"" + name + "\" already exists.\n";
+    }
+
+    std::string hpath = db_prefix_ + "_" + name + "_heap.db";
+    std::string ipath = db_prefix_ + "_" + name + "_index.db";
+
+    if (!catalog_->create_table(name, columns, hpath, ipath)) {
+        return "[ERROR] failed to create catalog entry for table \"" + name + "\".\n";
+    }
+
+    // Initialize physical storage
+    auto rel = get_or_open_relation(name);
+    if (!rel) {
+        return "[ERROR] failed to initialize storage for table \"" + name + "\".\n";
+    }
+
+    std::ostringstream oss;
+    oss << "CREATE TABLE: relation \"" << name << "\" (oid=" << catalog_->get_table(name)->rel_id
+        << ") successfully created with " << columns.size() << " columns.\n";
+    return oss.str();
+}
+
+std::string Engine::drop_table(const std::string& name) {
+    if (name == "items") {
+        return "[ERROR] cannot drop system/default relation \"items\".\n";
+    }
+
+    const TableMetadata* meta = catalog_->get_table(name);
+    if (!meta) {
+        return "[ERROR] relation \"" + name + "\" does not exist.\n";
+    }
+
+    std::string hpath = meta->heap_path;
+    std::string ipath = meta->index_path;
+
+    // Flush and remove handles
+    dynamic_relations_.erase(name);
+
+    // Remove from catalog
+    catalog_->drop_table(name);
+
+    // Remove physical files
+    if (std::filesystem::exists(hpath)) std::filesystem::remove(hpath);
+    if (std::filesystem::exists(ipath)) std::filesystem::remove(ipath);
+
+    return "DROP TABLE: relation \"" + name + "\" and physical files successfully dropped.\n";
+}
+
+std::string Engine::show_tables() {
+    auto tables = catalog_->all_tables();
+    std::ostringstream oss;
+    oss << "\n+--------+----------------------+\n";
+    oss << "| Rel ID | Relation Name        |\n";
+    oss << "+--------+----------------------+\n";
+    for (const auto& t : tables) {
+        oss << "| " << std::setw(6) << t.rel_id
+            << " | " << std::left << std::setw(20) << t.relname << std::right << " |\n";
+    }
+    oss << "+--------+----------------------+\n";
+    oss << "(" << tables.size() << " " << (tables.size() == 1 ? "relation" : "relations") << ")\n";
+    return oss.str();
+}
+
+std::string Engine::describe_table(const std::string& name) {
+    const TableMetadata* meta = catalog_->get_table(name);
+    if (!meta) {
+        return "[ERROR] relation \"" + name + "\" does not exist.\n";
+    }
+
+    std::ostringstream oss;
+    oss << "\nTable \"" << meta->relname << "\" (oid=" << meta->rel_id << "):\n";
+    oss << "+-----+----------------------+------+--------+\n";
+    oss << "| Pos | Column Name          | Type | Length |\n";
+    oss << "+-----+----------------------+------+--------+\n";
+    for (const auto& c : meta->columns) {
+        oss << "| " << std::setw(3) << c.num
+            << " | " << std::left << std::setw(20) << c.name << std::right
+            << " | " << std::setw(4) << c.type
+            << " | " << std::setw(6) << c.len << " |\n";
+    }
+    oss << "+-----+----------------------+------+--------+\n";
+    return oss.str();
+}
+
 Session Engine::new_session() {
     Session s;
     s.id = next_session_id_++;
@@ -589,6 +712,55 @@ std::string Engine::execute(const std::string& sql) {
         return checkpoint();
     }
 
+    // SHOW TABLES / \dt / TABLES
+    if (upper == "SHOW TABLES" || upper == "TABLES" || upper == "\\DT") {
+        return show_tables();
+    }
+
+    // DESCRIBE <table> / \d <table>
+    std::regex desc_regex(R"(^(?:DESCRIBE|\\D)\s+([a-zA-Z0-9_]+))", std::regex::icase);
+    std::smatch desc_match;
+    if (std::regex_search(clean, desc_match, desc_regex)) {
+        return describe_table(desc_match[1].str());
+    }
+
+    // DROP TABLE <name>
+    std::regex drop_table_regex(R"(^DROP\s+TABLE\s+([a-zA-Z0-9_]+))", std::regex::icase);
+    std::smatch drop_table_match;
+    if (std::regex_search(clean, drop_table_match, drop_table_regex)) {
+        return drop_table(drop_table_match[1].str());
+    }
+
+    // CREATE TABLE <name> (<columns>)
+    std::regex create_table_regex(R"(^CREATE\s+TABLE\s+([a-zA-Z0-9_]+)\s*\((.*)\))", std::regex::icase);
+    std::smatch create_match;
+    if (std::regex_search(clean, create_match, create_table_regex)) {
+        std::string name = create_match[1].str();
+        std::string cols_str = create_match[2].str();
+        std::vector<ColumnDef> columns;
+        std::stringstream ss(cols_str);
+        std::string col_token;
+        int16_t num = 1;
+        while (std::getline(ss, col_token, ',')) {
+            std::string trimmed = trim(col_token);
+            if (trimmed.empty()) continue;
+            std::stringstream col_ss(trimmed);
+            std::string cname, ctype;
+            col_ss >> cname >> ctype;
+            if (ctype.empty()) ctype = "INT";
+            ColumnDef cd;
+            cd.name = cname;
+            cd.type = to_upper(ctype);
+            cd.len = (cd.type == "INT" || cd.type == "INTEGER") ? 4 : 8;
+            cd.num = num++;
+            columns.push_back(cd);
+        }
+        if (columns.empty()) {
+            return "[ERROR] CREATE TABLE requires at least one column definition.\n";
+        }
+        return create_table(name, columns);
+    }
+
     // DUMP PAGE <id>
     std::regex dump_regex(R"(^DUMP\s+PAGE\s+(\d+))", std::regex::icase);
     std::smatch dump_match;
@@ -615,6 +787,34 @@ std::string Engine::execute(const std::string& sql) {
         int32_t price   = std::stoi(insert_match[2]);
         return insert_item(item_id, price);
     }
+
+    // Generic INSERT INTO <table> VALUES (val1, val2)
+    std::regex insert_gen_regex(R"(^INSERT\s+INTO\s+([a-zA-Z0-9_]+)\s*(?:VALUES\s*)?\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\))", std::regex::icase);
+    std::smatch insert_gen_match;
+    if (std::regex_search(clean, insert_gen_match, insert_gen_regex)) {
+        std::string tbl = insert_gen_match[1].str();
+        int32_t val1 = std::stoi(insert_gen_match[2]);
+        int32_t val2 = std::stoi(insert_gen_match[3]);
+        if (tbl == "items") {
+            return insert_item(val1, val2);
+        }
+        auto rel = get_or_open_relation(tbl);
+        if (!rel) {
+            return "[ERROR] relation \"" + tbl + "\" does not exist.\n";
+        }
+        bool autocommit = !sess_->current_tx.has_value();
+        if (autocommit) begin_transaction();
+        ensure_transaction();
+        tx_id_t tx_id = *sess_->current_tx;
+        CTID ctid = rel->heap->insert({val1, val2}, tx_id);
+        rel->index->insert_entry(val1, ctid);
+        std::ostringstream oss;
+        oss << "[Tx " << tx_id << "] INSERT INTO " << tbl << " (" << val1 << ", " << val2
+            << "): Placed at " << ctid.to_string() << ".\n";
+        if (autocommit) oss << commit_transaction();
+        return oss.str();
+    }
+
 
 
     // UPDATE items SET price = val WHERE item_id = id
@@ -791,21 +991,44 @@ std::string Engine::execute(const std::string& sql) {
         return table;
     }
 
-    // SELECT * FROM items [LIMIT N] [OFFSET M]
-    std::regex select_all_regex(R"(^SELECT\s+\*\s+FROM\s+items)", std::regex::icase);
-    if (std::regex_search(base_sql, select_all_regex)) {
-        if (!is_explain && query_limit == 0 && query_offset == 0) {
-            return select_all();
+    // SELECT * FROM <table> [LIMIT N] [OFFSET M]
+    std::regex select_all_regex(R"(^SELECT\s+\*\s+FROM\s+([a-zA-Z0-9_]+))", std::regex::icase);
+    std::smatch select_all_match;
+    if (std::regex_search(base_sql, select_all_match, select_all_regex)) {
+        std::string tbl = select_all_match[1].str();
+        if (tbl == "items") {
+            if (!is_explain && query_limit == 0 && query_offset == 0) {
+                return select_all();
+            }
+            if (!is_explain) {
+                return select_all(query_limit, query_offset);
+            }
+            ensure_transaction();
+            std::unique_ptr<PlanNode> plan = std::make_unique<SeqScanNode>(*heap_, *sess_->snapshot, tm_);
+            if (query_limit > 0 || query_offset > 0) {
+                plan = std::make_unique<LimitNode>(std::move(plan), query_limit > 0 ? query_limit : std::numeric_limits<size_t>::max(), query_offset);
+            }
+            return ExecutionEngine::explain(*plan, is_analyze);
+        } else {
+            auto rel = get_or_open_relation(tbl);
+            if (!rel) {
+                return "[ERROR] relation \"" + tbl + "\" does not exist.\n";
+            }
+            ensure_transaction();
+            std::unique_ptr<PlanNode> plan = std::make_unique<SeqScanNode>(*rel->heap, *sess_->snapshot, tm_);
+            if (query_limit > 0 || query_offset > 0) {
+                plan = std::make_unique<LimitNode>(std::move(plan), query_limit > 0 ? query_limit : std::numeric_limits<size_t>::max(), query_offset);
+            }
+            if (is_explain) {
+                return ExecutionEngine::explain(*plan, is_analyze);
+            }
+            bool autocommit = !sess_->current_tx.has_value();
+            if (autocommit) begin_transaction();
+            auto results = ExecutionEngine::execute(*plan);
+            std::string table = format_table(results, "Sequential Scan on " + tbl);
+            if (autocommit) commit_transaction();
+            return table;
         }
-        if (!is_explain) {
-            return select_all(query_limit, query_offset);
-        }
-        ensure_transaction();
-        std::unique_ptr<PlanNode> plan = std::make_unique<SeqScanNode>(*heap_, *sess_->snapshot, tm_);
-        if (query_limit > 0 || query_offset > 0) {
-            plan = std::make_unique<LimitNode>(std::move(plan), query_limit > 0 ? query_limit : std::numeric_limits<size_t>::max(), query_offset);
-        }
-        return ExecutionEngine::explain(*plan, is_analyze);
     }
 
     if (upper == "HELP") {
@@ -814,6 +1037,10 @@ std::string Engine::execute(const std::string& sql) {
         oss << "  BEGIN;                                         - Start MVCC transaction & snapshot\n";
         oss << "  COMMIT;                                        - Commit transaction & flush WAL\n";
         oss << "  ROLLBACK;                                      - Abort transaction\n";
+        oss << "  CREATE TABLE <name> (col1 INT, col2 INT);      - Create dynamic schema relation\n";
+        oss << "  DROP TABLE <name>;                             - Drop relation and delete files\n";
+        oss << "  SHOW TABLES; or \\dt;                          - List all registered relations\n";
+        oss << "  DESCRIBE <name>; or \\d <name>;                - Inspect relation column schema\n";
         oss << "  INSERT INTO items VALUES (100, 10);            - Insert new item\n";
         oss << "  UPDATE items SET price = 20 WHERE item_id = 100;- HOT / MVCC update item\n";
         oss << "  SELECT * FROM items [LIMIT N] [OFFSET M];       - Volcano streaming sequential scan\n";
