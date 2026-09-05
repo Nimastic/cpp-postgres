@@ -10,6 +10,10 @@
 Item 18 implements **Approach A: Direct Embedded HTTP/REST Server**.
 The database binary embeds a lightweight, non-blocking Winsock2 HTTP 1.1 server listening on port `8080`, allowing web applications (e.g. React, Vue, cURL) to query the database directly via JSON.
 
+**This has no PostgreSQL counterpart** — PostgreSQL speaks only the frontend/backend protocol on 5432 (Item 19), and HTTP access is provided by external projects (PostgREST, pgHttp, Supabase's API layer) sitting in front of it. Item 18 is a convenience for the desktop demo, not a modelled PostgreSQL subsystem.
+
+> Note that `Access-Control-Allow-Origin: *` on an endpoint that executes arbitrary SQL with no authentication is only acceptable because this daemon is intended to bind loopback on a developer machine. It must not be exposed on a routable interface.
+
 ```mermaid
 flowchart LR
     subgraph Frontend["Browser / React Application"]
@@ -77,3 +81,9 @@ sequenceDiagram
     HTTP->>HTTP: Format JSON response
     HTTP-->>React: HTTP 200 OK (JSON success and output)
 ```
+
+---
+
+## 4. PostgreSQL Fidelity Check
+
+Not applicable — no PostgreSQL analogue. See Item 19 for the subsystem that *is* protocol-accurate.

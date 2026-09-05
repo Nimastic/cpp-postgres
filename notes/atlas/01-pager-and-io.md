@@ -67,3 +67,40 @@ sequenceDiagram
     Pager->>OS: flush() (push to OS disk buffer)
     Pager-->>Client: void (page persisted)
 ```
+
+---
+
+## 4. PostgreSQL Fidelity Check
+
+PostgreSQL's counterpart to the Pager is the **storage manager** (`smgr`), whose only implementation is `md.c` ("magnetic disk").
+
+| Claim | Verdict |
+|---|---|
+| Relation file addressed as a linear array of fixed 8KB blocks | **Exact** |
+| `offset = block_number * BLCKSZ`, whole blocks only, never partial I/O | **Exact** |
+| Writing past the end extends the file in whole-block increments | **Exact in shape** — PostgreSQL's `mdextend()` zero-fills |
+| `stream.clear()` before seek after EOF | **C++-specific** — an artifact of `std::fstream`, no PostgreSQL analogue |
+| `flush()` after every write | **Divergent** — see below |
+
+### What PostgreSQL layers on top
+
+- **Segmentation.** A relation larger than 1 GB is split into `<relfilenode>`, `<relfilenode>.1`, `<relfilenode>.2`, … Block 200,000 lives in segment 1 at an offset computed modulo `RELSEG_SIZE`. This engine uses one unbounded file.
+- **Forks.** Each relation has a *main* fork plus `_fsm` (free space map), `_vm` (visibility map) and, for unlogged tables, `_init`. Only the main fork exists here.
+- **fsync is deferred, not per-write.** PostgreSQL writes with buffered `pwrite()` and hands the fsync obligation to the checkpointer through a shared request queue (`register_dirty_segment`), so durability is paid once per checkpoint rather than once per page. Flushing on every `write_page()`, as here, is far more conservative — and far slower — than PostgreSQL.
+- **`relfilenode` vs OID.** Filenames are `relfilenode` numbers, which *change* under `VACUUM FULL`, `TRUNCATE` and `REINDEX`; they are not the table's OID.
+- **Direct I/O and readahead.** `io_method` / `debug_io_direct`, and from v17 a streaming read interface that batches sequential block requests.
+
+### Implementation status (2026-08-27)
+
+The Pager no longer uses `std::fstream`. It sits on a raw descriptor (`pg::File`)
+with positioned reads and writes, which gives it two things a stream cannot:
+
+- **A real durability barrier.** `Pager::sync()` calls `fdatasync` (`_commit` on
+  Windows). `std::fstream::flush()` only drains the userspace buffer into the OS
+  page cache, so before this the WAL was not durable at all.
+- **No sticky stream state.** Positioned I/O has no shared cursor, so a read that
+  hits end-of-file cannot silently suppress a later write. That failure mode had
+  been quietly discarding the WAL records written during crash recovery.
+
+Still simplified: one file per relation with no 1GB segmentation, no forks, and
+`fsync` at checkpoint rather than through a checkpointer's request queue.

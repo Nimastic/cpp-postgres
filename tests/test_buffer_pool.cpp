@@ -20,10 +20,10 @@ void run_buffer_pool_tests() {
         auto pager = pg::Pager::open(db_name);
         for (pg::page_id_t pid = 0; pid < 4; ++pid) {
             pager->allocate_page();
-            pg::Page p;
+            pg::PageBuffer p;
             // Write a distinct signature onto each page
             std::string sig = "PAGE_SIGNATURE_" + std::to_string(pid);
-            p.insert_tuple(sig.data(), sig.size() + 1);
+            p->insert_tuple(sig.data(), sig.size() + 1);
             pager->write_page(pid, p.data());
         }
         assert(pager->num_pages() == 4);

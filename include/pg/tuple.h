@@ -38,7 +38,8 @@ struct CTID {
     }
 };
 
-// PostgreSQL Tuple Header (16 bytes)
+// Tuple header (16 bytes). Simplified: PostgreSQL HeapTupleHeaderData is 23 bytes
+// and also carries t_cid, t_infomask2, t_hoff and the t_bits null bitmap.
 struct TupleHeader {
     tx_id_t xmin{0};      // Transaction ID that created this tuple version
     tx_id_t xmax{0};      // Transaction ID that deleted or updated this tuple version
@@ -47,9 +48,12 @@ struct TupleHeader {
 };
 
 // Infomask bit flags for HOT (Heap-Only Tuples) and TOAST
-constexpr uint16_t HEAP_HASEXTERNAL  = 0x2000; // Tuple contains out-of-line TOASTed attributes
-constexpr uint16_t HEAP_HOT_UPDATED  = 0x4000; // This tuple was HOT-updated; t_ctid points to successor on same page
-constexpr uint16_t HEAP_ONLY_TUPLE   = 0x8000; // This tuple is a heap-only tuple (not indexed, reachable only via HOT chain)
+constexpr uint16_t HEAP_HASEXTERNAL  = 0x2000; // Tuple contains out-of-line TOASTed attributes.
+                                               // NOTE: PostgreSQL uses 0x0004 for this; 0x2000 is HEAP_UPDATED.
+constexpr uint16_t HEAP_HOT_UPDATED  = 0x4000; // This tuple was HOT-updated; t_ctid points to successor on same page.
+                                               // Same value as PostgreSQL, but PostgreSQL stores it in t_infomask2.
+constexpr uint16_t HEAP_ONLY_TUPLE   = 0x8000; // This tuple is a heap-only tuple (not indexed, reachable only via HOT chain).
+                                               // Same value as PostgreSQL, but PostgreSQL stores it in t_infomask2.
 
 
 // Items Table Schema Record (8 bytes)

@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <vector>
 #include <string>
-#include <fstream>
+#include "pg/file.h"
 #include <memory>
 #include <optional>
 #include <unordered_set>
@@ -78,9 +78,26 @@ public:
     lsn_t log_checkpoint();
     lsn_t log_fpi(page_id_t page_id, const void* page_data);
 
-    // Flush WAL records up to target_lsn (fsync / stream flush)
+    // Make every record up to target_lsn durable. This is a real fsync, not a
+    // userspace buffer flush: it is the barrier that COMMIT and dirty-page
+    // eviction both depend on.
     void flush(lsn_t target_lsn);
     void flush();
+
+    // Named for the caller's intent: "do not proceed until the log covering this
+    // page LSN is on disk". Cheap when already satisfied.
+    void flush_up_to(lsn_t page_lsn) {
+        if (page_lsn > flushed_lsn_) {
+            flush(page_lsn);
+        }
+    }
+
+    // Has this page already been given a full-page image since the last
+    // checkpoint? Torn-page protection only needs the first write after a
+    // checkpoint to carry the whole image.
+    bool needs_fpi(page_id_t page_id) const {
+        return fpi_written_pages_.find(page_id) == fpi_written_pages_.end();
+    }
 
     // LSN inspection
     lsn_t current_lsn() const { return current_lsn_; }
@@ -95,10 +112,14 @@ public:
     // and replays all committed operations onto the heap file
     size_t recover(HeapFile& heap, TransactionManager& tm);
 
+    // Truncate the log. Used after a checkpoint proves every prior record is
+    // reflected on disk, so recovery need never look further back.
+    void reset_after_checkpoint();
+
 private:
     std::string wal_path_;
     BufferPoolManager* bpm_{nullptr};
-    std::fstream stream_;
+    File file_;
     lsn_t current_lsn_{0};
     lsn_t flushed_lsn_{0};
     lsn_t prev_lsn_{0};

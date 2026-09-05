@@ -5,18 +5,6 @@
 
 namespace pg {
 
-Page::Page() {
-    init();
-}
-
-Page::Page(const void* raw_data) {
-    if (raw_data != nullptr) {
-        std::memcpy(data_, raw_data, PAGE_SIZE);
-    } else {
-        init();
-    }
-}
-
 void Page::init() {
     std::memset(data_, 0, PAGE_SIZE);
     auto* hdr = reinterpret_cast<PageHeaderData*>(data_);
@@ -69,10 +57,16 @@ slot_id_t Page::insert_tuple(const void* data, size_t len) {
     auto* lp_array = line_pointers_internal();
     size_t slots = num_slots();
 
-    // Check if we can reuse an existing DEAD or UNUSED line pointer
+    // Recycle an UNUSED line pointer if one exists.
+    //
+    // DEAD is deliberately excluded. A DEAD pointer may still be the target of an
+    // index entry that VACUUM has not cleaned yet; handing that slot to a new
+    // tuple would make the stale index entry resolve to an unrelated row. VACUUM
+    // demotes DEAD to UNUSED only after every index has been vacuumed of that
+    // TID, which is exactly PostgreSQL's rule.
     for (size_t i = 0; i < slots; ++i) {
-        if (lp_array[i].flags() == ItemFlags::DEAD || lp_array[i].flags() == ItemFlags::UNUSED) {
-            // Dead slot already exists; only need space for tuple payload
+        if (lp_array[i].flags() == ItemFlags::UNUSED) {
+            // Reusable slot already exists; only need space for tuple payload
             if (hdr.pd_upper < hdr.pd_lower || (hdr.pd_upper - hdr.pd_lower) < len) {
                 return INVALID_SLOT_ID; // Not enough free space
             }
@@ -139,8 +133,13 @@ void Page::defragment() {
             lp.set(new_offset, len, ItemFlags::NORMAL);
             current_upper = new_offset;
         } else if (lp.flags() == ItemFlags::DEAD) {
-            // Dead tuple has no physical bytes allocated in compacted area
+            // Dead tuple keeps its slot but loses its storage. The slot number
+            // stays valid so index entries pointing at it still resolve (to
+            // nothing) rather than to some other row.
             lp.set(0, 0, ItemFlags::DEAD);
+        } else if (lp.flags() == ItemFlags::REDIRECT) {
+            // A HOT chain root: lp_offset holds the successor slot number, not a
+            // byte offset, so it must survive compaction untouched.
         }
     }
 
@@ -178,6 +177,48 @@ const uint8_t* Page::get_tuple_ptr(slot_id_t slot_id, size_t* out_len) const {
         *out_len = lp.length();
     }
     return data_ + lp.lp_offset;
+}
+
+uint8_t* Page::get_tuple_ptr_mut(slot_id_t slot_id, size_t* out_len) {
+    return const_cast<uint8_t*>(static_cast<const Page*>(this)->get_tuple_ptr(slot_id, out_len));
+}
+
+// Place a tuple at one specific slot. Used only by WAL redo, which must
+// reproduce the physical layout that was logged rather than let the page pick.
+bool Page::insert_tuple_at(slot_id_t slot_id, const void* data, size_t len) {
+    if (data == nullptr || len == 0 || slot_id == INVALID_SLOT_ID) {
+        return false;
+    }
+
+    auto& hdr = header();
+
+    // Grow the line pointer array until it covers slot_id.
+    while (num_slots() < slot_id) {
+        if (hdr.pd_upper < hdr.pd_lower ||
+            (hdr.pd_upper - hdr.pd_lower) < sizeof(LinePointer)) {
+            return false;
+        }
+        size_t idx = (hdr.pd_lower - sizeof(PageHeaderData)) / sizeof(LinePointer);
+        line_pointers_internal()[idx].set(0, 0, ItemFlags::UNUSED);
+        hdr.pd_lower += static_cast<uint16_t>(sizeof(LinePointer));
+    }
+
+    auto& lp = line_pointers_internal()[slot_id - 1];
+    if (lp.flags() == ItemFlags::NORMAL && lp.length() == len) {
+        // Already present at this slot; redo is idempotent, so overwrite in place.
+        std::memcpy(data_ + lp.lp_offset, data, len);
+        return true;
+    }
+
+    if (hdr.pd_upper < hdr.pd_lower || (hdr.pd_upper - hdr.pd_lower) < len) {
+        return false;
+    }
+
+    uint16_t new_upper = static_cast<uint16_t>(hdr.pd_upper - len);
+    std::memcpy(data_ + new_upper, data, len);
+    lp.set(new_upper, static_cast<uint16_t>(len), ItemFlags::NORMAL);
+    hdr.pd_upper = new_upper;
+    return true;
 }
 
 std::optional<std::vector<uint8_t>> Page::get_tuple(slot_id_t slot_id) const {

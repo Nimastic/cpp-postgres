@@ -73,30 +73,15 @@ std::optional<std::pair<CTID, HeapTuple>> index_lookup(
     const Snapshot& snapshot,
     const TransactionManager& tm
 ) {
+    // The index answers with candidate CTIDs and nothing else: index tuples
+    // carry no xmin/xmax, so visibility can only be settled against the heap.
+    // Each candidate is the root of a HOT chain, which the heap knows how to
+    // walk (including through an LP_REDIRECT left by pruning).
     std::vector<CTID> candidate_ctids = index.find_entries(key);
     for (const auto& root_ctid : candidate_ctids) {
-        // Follow the HOT chain starting from this index entry
-        CTID current = root_ctid;
-        size_t max_chain_depth = 100; // Safety limit
-
-        for (size_t depth = 0; depth < max_chain_depth; ++depth) {
-            auto tuple_opt = heap.get(current);
-            if (!tuple_opt.has_value()) {
-                break;
-            }
-
-            if (is_tuple_visible(tuple_opt->header, snapshot, tm)) {
-                return std::make_pair(current, *tuple_opt);
-            }
-
-            // If this tuple was HOT-updated, follow t_ctid to the next version on same page
-            if ((tuple_opt->header.infomask & HEAP_HOT_UPDATED) &&
-                tuple_opt->header.t_ctid != current &&
-                tuple_opt->header.t_ctid.page == current.page) {
-                current = tuple_opt->header.t_ctid;
-            } else {
-                break; // End of chain or not a HOT chain
-            }
+        auto hit = heap.hot_search(root_ctid, snapshot, tm);
+        if (hit.has_value()) {
+            return hit;
         }
     }
     return std::nullopt;

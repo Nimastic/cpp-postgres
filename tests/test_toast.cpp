@@ -112,7 +112,6 @@ void run_toast_tests() {
             row.price = i * 100;
             row.desc_ptr = val.pointer;
 
-            pg::Page p;
             // Insert 42-byte row into main heap
             pg::CTID ctid = heap->insert({row.item_id, row.price}, 1);
             assert(ctid.page == 0); // All 10 rows fit easily on Page 0!

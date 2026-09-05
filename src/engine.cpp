@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <regex>
+#include <iostream>
 
 namespace pg {
 
@@ -23,66 +24,119 @@ static std::string to_upper(const std::string& str) {
 }
 
 Engine::Engine(const std::string& db_prefix) : db_prefix_(db_prefix) {
+    // The control file is read before anything else, because it is what says
+    // whether the previous run shut down cleanly.
+    control_ = std::make_unique<ControlFile>(db_prefix_ + "_control.db");
+
     clog_ = CLogManager::open(db_prefix_ + "_clog.db");
     tm_.set_clog(clog_.get());
 
     heap_ = HeapFile::open(db_prefix_ + "_heap.db");
     wal_ = WALManager::open(db_prefix_ + "_wal.log");
-    bpm_ = std::make_unique<BufferPoolManager>(heap_->pager(), 16);
     toast_ = ToastManager::open(db_prefix_ + "_toast.db");
 
-    // Wire buffer pool into heap and WAL: all page I/O now goes through shared_buffers
-    heap_->set_bpm(bpm_.get());
-    wal_->set_bpm(bpm_.get());
+    // One pool per relation. The heap made its own on construction and the
+    // engine adopts it rather than building a second one over the same file:
+    // two pools over one relation is exactly how the cached copy and the disk
+    // copy drift apart.
+    BufferPoolManager& pool = *heap_->bpm();
 
-    // Populate B-Tree index and advance next_tx_id_ from existing table data
+    // Close the loop between the log and the pool in both directions. The heap
+    // logs each change while holding the page pinned, and the pool refuses to
+    // write a page out until the log covering it is durable.
+    heap_->set_wal(wal_.get());
+    wal_->set_bpm(&pool);
+    pool.set_wal(wal_.get());
+
+    // Restore the transaction counter from the control file rather than from
+    // surviving data, so ids are never reissued.
+    tm_.set_next_tx_id(std::max<tx_id_t>(1, control_->data().next_xid));
+
+    // Crash recovery, decided by the control file and run before the database
+    // serves anything, rather than left for an operator to invoke by hand.
+    if (control_->needs_recovery()) {
+        size_t replayed = wal_->recover(*heap_, tm_);
+        recovered_at_startup_ = true;
+        if (replayed > 0) {
+            std::cerr << "[STARTUP] Unclean shutdown detected; replayed "
+                      << replayed << " WAL records." << std::endl;
+        }
+    }
+
+    // Rebuild the in-memory index from the heap. A disk-resident index would
+    // not need this; see notes/2026-08-27-architecture-audit.md item 2.3.
     auto all_rows = heap_->seq_scan();
     tx_id_t max_xid = 0;
     for (const auto& [ctid, tuple] : all_rows) {
         index_.insert_entry(tuple.data.item_id, ctid);
         max_xid = std::max(max_xid, std::max(tuple.header.xmin, tuple.header.xmax));
     }
-    if (max_xid > 0) {
+    if (max_xid >= tm_.next_tx_id()) {
         tm_.set_next_tx_id(max_xid + 1);
+    }
+
+    control_->data().next_xid = tm_.next_tx_id();
+    control_->mark_in_production();
+}
+
+Engine::~Engine() {
+    try {
+        // A clean shutdown: get everything onto disk, then record that it is on
+        // disk. Marking first would let a crash in between look clean.
+        if (heap_ && heap_->bpm()) {
+            heap_->bpm()->flush_all();
+            heap_->pager().sync();
+        }
+        if (wal_) {
+            wal_->flush();
+        }
+        if (control_) {
+            control_->data().next_xid = tm_.next_tx_id();
+            control_->data().checkpoint_lsn = wal_ ? wal_->checkpoint_lsn() : 0;
+            control_->mark_shutdown();
+        }
+    } catch (...) {
+        // Never throw out of a destructor.
     }
 }
 
 void Engine::ensure_transaction(bool is_read_only) {
-    if (!current_tx_.has_value()) {
+    if (!sess_->current_tx.has_value()) {
         tx_id_t tx_id = tm_.begin_transaction();
-        current_tx_ = tx_id;
-        current_snapshot_ = tm_.take_snapshot(tx_id);
-    } else if (!current_snapshot_.has_value()) {
-        current_snapshot_ = tm_.take_snapshot(*current_tx_);
+        sess_->current_tx = tx_id;
+        sess_->snapshot = tm_.take_snapshot(tx_id);
+    } else if (!sess_->snapshot.has_value()) {
+        sess_->snapshot = tm_.take_snapshot(*sess_->current_tx);
     }
 }
 
 std::string Engine::begin_transaction() {
-    if (current_tx_.has_value()) {
-        return "[WARNING] Transaction " + std::to_string(*current_tx_) + " is already active.\n";
+    if (sess_->current_tx.has_value()) {
+        return "[WARNING] Transaction " + std::to_string(*sess_->current_tx) + " is already active.\n";
     }
 
     tx_id_t tx_id = tm_.begin_transaction();
-    current_tx_ = tx_id;
-    current_snapshot_ = tm_.take_snapshot(tx_id);
+    sess_->current_tx = tx_id;
+    sess_->snapshot = tm_.take_snapshot(tx_id);
 
     std::ostringstream oss;
     oss << "[Tx " << tx_id << "] BEGIN: Transaction started. Snapshot: [xmin=" 
-        << current_snapshot_->xmin << ", xmax=" << current_snapshot_->xmax << "]\n";
+        << sess_->snapshot->xmin << ", xmax=" << sess_->snapshot->xmax << "]\n";
     return oss.str();
 }
 
 std::string Engine::commit_transaction() {
-    if (!current_tx_.has_value()) {
+    if (!sess_->current_tx.has_value()) {
         return "[WARNING] No active transaction to commit.\n";
     }
 
-    tx_id_t tx_id = *current_tx_;
+    tx_id_t tx_id = *sess_->current_tx;
     lsn_t lsn = wal_->log_commit(tx_id);
     tm_.commit(tx_id);
+    lock_mgr_.release_all(tx_id);   // Row locks live exactly as long as the transaction
 
-    current_tx_ = std::nullopt;
-    current_snapshot_ = std::nullopt;
+    sess_->current_tx = std::nullopt;
+    sess_->snapshot = std::nullopt;
 
     std::ostringstream oss;
     oss << "[Tx " << tx_id << "] COMMIT: Logged to WAL (LSN: " << lsn << "). Transaction committed.\n";
@@ -90,16 +144,17 @@ std::string Engine::commit_transaction() {
 }
 
 std::string Engine::rollback_transaction() {
-    if (!current_tx_.has_value()) {
+    if (!sess_->current_tx.has_value()) {
         return "[WARNING] No active transaction to rollback.\n";
     }
 
-    tx_id_t tx_id = *current_tx_;
+    tx_id_t tx_id = *sess_->current_tx;
     lsn_t lsn = wal_->log_abort(tx_id);
     tm_.abort(tx_id);
+    lock_mgr_.release_all(tx_id);
 
-    current_tx_ = std::nullopt;
-    current_snapshot_ = std::nullopt;
+    sess_->current_tx = std::nullopt;
+    sess_->snapshot = std::nullopt;
 
     std::ostringstream oss;
     oss << "[Tx " << tx_id << "] ROLLBACK: Logged to WAL (LSN: " << lsn << "). Transaction aborted.\n";
@@ -107,19 +162,16 @@ std::string Engine::rollback_transaction() {
 }
 
 std::string Engine::insert_item(int32_t item_id, int32_t price) {
-    bool autocommit = !current_tx_.has_value();
+    bool autocommit = !sess_->current_tx.has_value();
     if (autocommit) {
         begin_transaction();
     }
 
-    tx_id_t tx_id = *current_tx_;
+    tx_id_t tx_id = *sess_->current_tx;
+    // HeapFile writes the WAL record itself, before the page change and while
+    // the page is pinned. The engine no longer logs after the fact.
     CTID ctid = heap_->insert({item_id, price}, tx_id);
-
-    auto tuple_opt = heap_->get(ctid);
-    lsn_t lsn = 0;
-    if (tuple_opt.has_value()) {
-        lsn = wal_->log_insert(tx_id, ctid.page, ctid.slot, *tuple_opt);
-    }
+    lsn_t lsn = wal_->current_lsn();
 
     index_.insert_entry(item_id, ctid);
 
@@ -135,12 +187,12 @@ std::string Engine::insert_item(int32_t item_id, int32_t price) {
 }
 
 std::string Engine::insert_item_with_doc(int32_t item_id, int32_t price, const std::string& doc) {
-    bool autocommit = !current_tx_.has_value();
+    bool autocommit = !sess_->current_tx.has_value();
     if (autocommit) {
         begin_transaction();
     }
 
-    tx_id_t tx_id = *current_tx_;
+    tx_id_t tx_id = *sess_->current_tx;
     ToastValue tv = toast_->store_string(doc);
 
     CTID ctid = heap_->insert({item_id, price}, tx_id);
@@ -154,11 +206,7 @@ std::string Engine::insert_item_with_doc(int32_t item_id, int32_t price, const s
         }
     }
 
-    auto tuple_opt = heap_->get(ctid);
-    lsn_t lsn = 0;
-    if (tuple_opt.has_value()) {
-        lsn = wal_->log_insert(tx_id, ctid.page, ctid.slot, *tuple_opt);
-    }
+    lsn_t lsn = wal_->current_lsn();
 
     index_.insert_entry(item_id, ctid);
 
@@ -181,7 +229,7 @@ std::string Engine::insert_item_with_doc(int32_t item_id, int32_t price, const s
 
 std::string Engine::select_doc_by_id(int32_t item_id) {
     ensure_transaction(true);
-    auto visible_opt = index_lookup(index_, *heap_, item_id, *current_snapshot_, tm_);
+    auto visible_opt = index_lookup(index_, *heap_, item_id, *sess_->snapshot, tm_);
     if (!visible_opt.has_value()) {
         return "[SELECT] No visible row found with item_id=" + std::to_string(item_id) + ".\n";
     }
@@ -200,16 +248,16 @@ std::string Engine::select_doc_by_id(int32_t item_id) {
 
 
 std::string Engine::update_item(int32_t item_id, int32_t new_price) {
-    bool autocommit = !current_tx_.has_value();
+    bool autocommit = !sess_->current_tx.has_value();
     if (autocommit) {
         begin_transaction();
     }
 
-    tx_id_t tx_id = *current_tx_;
+    tx_id_t tx_id = *sess_->current_tx;
     ensure_transaction();
 
     // 1. Locate current visible tuple via B-Tree index
-    auto visible_opt = index_lookup(index_, *heap_, item_id, *current_snapshot_, tm_);
+    auto visible_opt = index_lookup(index_, *heap_, item_id, *sess_->snapshot, tm_);
     if (!visible_opt.has_value()) {
         if (autocommit) commit_transaction();
         return "[Tx " + std::to_string(tx_id) + "] UPDATE: No visible row found with item_id=" + std::to_string(item_id) + ".\n";
@@ -217,17 +265,32 @@ std::string Engine::update_item(int32_t item_id, int32_t new_price) {
 
     CTID old_ctid = visible_opt->first;
 
-    // 2. Try HOT Update first (same page, 0 index writes)
-    auto hot_res = heap_->hot_update(old_ctid, {item_id, new_price}, tx_id);
+    // 2. Serialise writers on this row. MVCC keeps readers out of the way, but
+    // two transactions updating the same row must not both succeed: without
+    // this the second write simply overwrites the first, losing it.
+    if (!lock_mgr_.try_lock(old_ctid, tx_id)) {
+        std::string holder = std::to_string(lock_mgr_.holder(old_ctid));
+        if (autocommit) rollback_transaction();
+        else sess_->failed = true;
+        return "[Tx " + std::to_string(tx_id) + "] ERROR: could not serialize access to row " +
+               old_ctid.to_string() + "; transaction " + holder + " holds the write lock on it.\n";
+    }
+
+    // 3. HOT is only legal when no indexed column changes. The engine indexes
+    // items(item_id), so an update that leaves item_id alone qualifies. Checking
+    // it rather than assuming it means adding a second index, or allowing
+    // item_id itself to be updated, cannot silently skip an index write.
+    const bool indexed_columns_unchanged = (visible_opt->second.data.item_id == item_id);
+
+    std::optional<CTID> hot_res;
+    if (indexed_columns_unchanged) {
+        hot_res = heap_->hot_update(old_ctid, {item_id, new_price}, tx_id);
+    }
 
     std::ostringstream oss;
     if (hot_res.has_value()) {
         CTID new_ctid = *hot_res;
-        auto new_tuple_opt = heap_->get(new_ctid);
-        lsn_t lsn = 0;
-        if (new_tuple_opt.has_value()) {
-            lsn = wal_->log_update(tx_id, old_ctid, new_ctid, *new_tuple_opt);
-        }
+        lsn_t lsn = wal_->current_lsn();
 
         oss << "[Tx " << tx_id << "] UPDATE: HOT-update successful! Placed at " 
             << new_ctid.to_string() << " on SAME page (WAL LSN: " << lsn 
@@ -235,11 +298,7 @@ std::string Engine::update_item(int32_t item_id, int32_t new_price) {
     } else {
         // Fallback to standard non-in-place update
         CTID new_ctid = heap_->update(old_ctid, {item_id, new_price}, tx_id);
-        auto new_tuple_opt = heap_->get(new_ctid);
-        lsn_t lsn = 0;
-        if (new_tuple_opt.has_value()) {
-            lsn = wal_->log_update(tx_id, old_ctid, new_ctid, *new_tuple_opt);
-        }
+        lsn_t lsn = wal_->current_lsn();
 
         index_.insert_entry(item_id, new_ctid);
         oss << "[Tx " << tx_id << "] UPDATE: Standard update placed at " 
@@ -255,13 +314,13 @@ std::string Engine::update_item(int32_t item_id, int32_t new_price) {
 }
 
 std::string Engine::select_all() {
-    bool autocommit = !current_tx_.has_value();
+    bool autocommit = !sess_->current_tx.has_value();
     if (autocommit) {
         begin_transaction();
     }
 
     ensure_transaction();
-    auto visible = heap_->seq_scan(*current_snapshot_, tm_);
+    auto visible = heap_->seq_scan(*sess_->snapshot, tm_);
 
     std::string table = format_table(visible, "Sequential Table Scan");
 
@@ -273,13 +332,13 @@ std::string Engine::select_all() {
 }
 
 std::string Engine::select_by_id(int32_t item_id) {
-    bool autocommit = !current_tx_.has_value();
+    bool autocommit = !sess_->current_tx.has_value();
     if (autocommit) {
         begin_transaction();
     }
 
     ensure_transaction();
-    auto visible_opt = index_lookup(index_, *heap_, item_id, *current_snapshot_, tm_);
+    auto visible_opt = index_lookup(index_, *heap_, item_id, *sess_->snapshot, tm_);
 
     std::vector<std::pair<CTID, HeapTuple>> results;
     if (visible_opt.has_value()) {
@@ -296,13 +355,17 @@ std::string Engine::select_by_id(int32_t item_id) {
 }
 
 std::string Engine::vacuum() {
-    auto stats = Vacuum::run(*heap_, tm_);
+    // The index is passed in so phase 2 can remove entries pointing at the
+    // slots phase 1 flagged. Without it those slots can never be safely freed.
+    auto stats = Vacuum::run(*heap_, tm_, index_);
 
     std::ostringstream oss;
-    oss << "[VACUUM] Garbage collection complete (Cutoff oldest_active_xmin=" << tm_.oldest_active_xmin() 
+    oss << "[VACUUM] Garbage collection complete (horizon oldest_snapshot_xmin=" << tm_.oldest_snapshot_xmin() 
         << "). Reclaimed " << stats.dead_tuples_reclaimed << " dead tuples (" 
         << stats.bytes_reclaimed << " bytes) across " 
-        << stats.pages_scanned << " pages.\n";
+        << stats.pages_scanned << " pages; removed "
+        << stats.index_entries_removed << " index entries, redirected "
+        << stats.hot_roots_redirected << " HOT roots.\n";
     return oss.str();
 }
 
@@ -311,10 +374,10 @@ std::string Engine::dump_page(page_id_t page_id) {
         return "[ERROR] Invalid page_id " + std::to_string(page_id) + ". Table has " + std::to_string(heap_->num_pages()) + " pages.\n";
     }
 
-    // Flush dirty buffer pool pages to disk so we read fresh data
-    if (bpm_) {
-        bpm_->flush_all();
-    }
+    // Flush through the pool first: the pool is the authority on current page
+    // contents, and reading the file directly shows a stale page whenever the
+    // frame is dirty.
+    heap_->bpm()->flush_all();
 
     std::vector<uint8_t> page_buffer(PAGE_SIZE, 0);
     heap_->pager().read_page(page_id, page_buffer.data());
@@ -364,10 +427,10 @@ std::string Engine::dump_page(page_id_t page_id) {
 std::string Engine::status() {
     std::ostringstream oss;
     oss << "\n================== POSTGRES ENGINE STATUS ==================\n";
-    oss << "Active Tx        : " << (current_tx_.has_value() ? std::to_string(*current_tx_) : "None (Autocommit)") << "\n";
+    oss << "Active Tx        : " << (sess_->current_tx.has_value() ? std::to_string(*sess_->current_tx) : "None (Autocommit)") << "\n";
     oss << "Oldest Active XID: " << tm_.oldest_active_xmin() << "\n";
     oss << "Total Heap Pages : " << heap_->num_pages() << " (File size: " << (heap_->num_pages() * 8) << " KB)\n";
-    oss << "Buffer Pool Size : " << bpm_->pool_size() << " frames (" << bpm_->resident_pages() << " resident in RAM)\n";
+    oss << "Buffer Pool Size : " << bpm().pool_size() << " frames (" << bpm().resident_pages() << " resident in RAM)\n";
     oss << "WAL Flushed LSN  : " << wal_->flushed_lsn() << " bytes\n";
     oss << "Index Entries    : " << index_.num_entries() << " candidate CTIDs\n";
     oss << "============================================================\n";
@@ -403,6 +466,29 @@ std::string Engine::format_table(const std::vector<std::pair<CTID, HeapTuple>>& 
     oss << "(" << tuples.size() << " " << (tuples.size() == 1 ? "row" : "rows") 
         << " returned via " << scan_method << ")\n";
     return oss.str();
+}
+
+Session Engine::new_session() {
+    Session s;
+    s.id = next_session_id_++;
+    return s;
+}
+
+std::string Engine::execute(const std::string& sql, Session& session) {
+    // Point the engine at this session for the duration of the statement. The
+    // server serialises statements with a mutex, so exactly one session is
+    // current at a time even though many exist.
+    Session* prev = sess_;
+    sess_ = &session;
+    std::string out;
+    try {
+        out = execute(sql);
+    } catch (...) {
+        sess_ = prev;
+        throw;
+    }
+    sess_ = prev;
+    return out;
 }
 
 std::string Engine::execute(const std::string& sql) {

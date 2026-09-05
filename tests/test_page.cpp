@@ -11,7 +11,8 @@ namespace fs = std::filesystem;
 
 void run_page_tests() {
     std::cout << "[Test 1] Initializing blank slotted page..." << std::endl;
-    pg::Page page;
+    pg::PageBuffer page_buf;
+    pg::Page& page = *page_buf;
     assert(page.num_slots() == 0);
     assert(page.header().pd_lower == sizeof(pg::PageHeaderData));
     assert(page.header().pd_upper == pg::PAGE_SIZE);

@@ -7,7 +7,7 @@ ToastManager::ToastManager(std::unique_ptr<Pager> toast_pager) : pager_(std::mov
     if (pager_ && pager_->num_pages() == 0) {
         // Initialize Page 0 for TOAST table
         page_id_t pid = pager_->allocate_page();
-        Page p0;
+        PageBuffer p0;
         pager_->write_page(pid, p0.data());
     }
 }
@@ -122,8 +122,8 @@ void ToastManager::flush_chunk_to_page(uint64_t toast_id, uint32_t chunk_seq, co
 
     // Current TOAST page is full -> allocate new 8KB TOAST page
     page_id_t new_pid = pager_->allocate_page();
-    Page new_page;
-    slot_id_t new_slot = new_page.insert_tuple(data, len);
+    PageBuffer new_page;
+    slot_id_t new_slot = new_page->insert_tuple(data, len);
     if (new_slot == INVALID_SLOT_ID) {
         throw std::runtime_error("ToastManager: Chunk larger than empty 8KB page");
     }

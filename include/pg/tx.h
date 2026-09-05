@@ -22,7 +22,7 @@ enum class TransactionStatus : uint8_t {
 
 struct Snapshot {
     tx_id_t current_tx_id{0};                  // The transaction that owns this snapshot
-    tx_id_t xmin{0};                           // All tx < xmin are committed and visible
+    tx_id_t xmin{0};                           // All tx < xmin are FINISHED (committed or aborted)
     tx_id_t xmax{0};                           // All tx >= xmax are in the future (invisible)
     std::unordered_set<tx_id_t> active_txs{};  // Active transactions when snapshot was taken (invisible)
 
@@ -53,8 +53,22 @@ public:
     // Set status of a transaction (used during WAL crash recovery / CLOG sync)
     void set_status(tx_id_t tx_id, TransactionStatus status);
 
-    // Returns the lowest xmin among all currently active snapshots (or next_tx_id if none active)
+    // Lowest transaction id still running. Not a safe VACUUM cutoff on its own.
     tx_id_t oldest_active_xmin() const;
+
+    // Lowest xmin across every snapshot still held by a running transaction.
+    // This is the VACUUM horizon (PostgreSQL's GetOldestNonRemovableTransactionId):
+    // a transaction holding an old snapshot can still need row versions deleted
+    // by transactions numbered below its own id, so the cutoff must come from
+    // the snapshots, not from the transaction ids.
+    tx_id_t oldest_snapshot_xmin() const;
+
+    // Register/forget the snapshot a running transaction holds, so the horizon
+    // above can be computed. PostgreSQL publishes this as PGPROC.xmin.
+    void register_snapshot(tx_id_t tx_id, tx_id_t snapshot_xmin);
+    void forget_snapshot(tx_id_t tx_id);
+
+    size_t active_count() const { return active_txs_.size(); }
 
     // Get current global transaction ID counter
     tx_id_t next_tx_id() const { return next_tx_id_; }
@@ -69,6 +83,7 @@ private:
     CLogManager* clog_{nullptr};
     std::unordered_map<tx_id_t, TransactionStatus> status_map_;
     std::unordered_set<tx_id_t> active_txs_;
+    std::unordered_map<tx_id_t, tx_id_t> snapshot_xmins_;  // tx_id -> xmin of the snapshot it holds
 };
 
 } // namespace pg

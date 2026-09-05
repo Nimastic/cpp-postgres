@@ -9,6 +9,8 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Core Postgres engine library
 add_library(pg_core
+    src/file.cpp
+    src/control.cpp
     src/pager.cpp
     src/page.cpp
     src/heap.cpp
@@ -29,6 +31,13 @@ add_library(pg_core
 target_link_libraries(pg_core PUBLIC ws2_32)
 
 # Interactive SQL REPL CLI Application
+# Regression tests for notes/2026-08-27-architecture-audit.md
+add_executable(test_recovery tests/test_recovery.cpp)
+target_link_libraries(test_recovery PRIVATE pg_core)
+
+add_executable(test_concurrency tests/test_concurrency.cpp)
+target_link_libraries(test_concurrency PRIVATE pg_core)
+
 add_executable(pg_cli src/main.cpp)
 target_link_libraries(pg_cli PRIVATE pg_core)
 

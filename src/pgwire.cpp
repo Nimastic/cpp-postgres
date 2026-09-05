@@ -140,6 +140,11 @@ void PgWireServer::handle_client_session(uintptr_t client_socket) {
         return;
     }
 
+    // One session per connection. Its transaction and snapshot belong to this
+    // client alone, so another client BEGIN-ing cannot pull this one into its
+    // transaction, and its COMMIT cannot commit this one's writes.
+    Session session = engine_.new_session();
+
     // Message loop
     while (running_.load()) {
         char msg_type = 0;
@@ -159,7 +164,7 @@ void PgWireServer::handle_client_session(uintptr_t client_socket) {
         if (msg_type == 'Q') { // Simple Query
             std::string query(payload.data(), payload.size());
             if (!query.empty() && query.back() == '\0') query.pop_back();
-            process_query_packet(client_socket, query);
+            process_query_packet(client_socket, query, session);
         } else if (msg_type == 'X') { // Terminate
             break;
         } else {
@@ -230,7 +235,7 @@ bool PgWireServer::handle_startup_handshake(uintptr_t sock_ptr) {
     }
 }
 
-bool PgWireServer::process_query_packet(uintptr_t sock_ptr, const std::string& query) {
+bool PgWireServer::process_query_packet(uintptr_t sock_ptr, const std::string& query, Session& session) {
     SOCKET sock = static_cast<SOCKET>(sock_ptr);
 
     std::string q_upper = query;
@@ -326,7 +331,7 @@ bool PgWireServer::process_query_packet(uintptr_t sock_ptr, const std::string& q
         send_command_complete(sock_ptr, "SELECT " + std::to_string(result_rows.size()));
     } else {
         // Run general command through Engine (INSERT, UPDATE, BEGIN, COMMIT, ROLLBACK, VACUUM, etc.)
-        std::string out = engine_.execute(query);
+        std::string out = engine_.execute(query, session);
 
         if (q_upper.find("INSERT") != std::string::npos) {
             send_command_complete(sock_ptr, "INSERT 0 1");
@@ -343,8 +348,10 @@ bool PgWireServer::process_query_packet(uintptr_t sock_ptr, const std::string& q
         }
     }
 
-    // Determine transaction status
-    char tx_st = engine_.is_in_transaction() ? 'T' : 'I';
+    // Transaction status is per connection: 'I' idle, 'T' inside a transaction
+    // block, 'E' inside one that has failed and will reject everything until
+    // ROLLBACK.
+    char tx_st = session.failed ? 'E' : (session.in_transaction() ? 'T' : 'I');
     send_ready_for_query(sock_ptr, tx_st);
     return true;
 }

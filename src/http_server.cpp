@@ -221,7 +221,11 @@ std::string HttpServer::process_http_request(const std::string& method, const st
         }
 
         std::lock_guard<std::mutex> lock(engine_mutex_);
-        std::string engine_out = engine_.execute(sql);
+        // A REST call is stateless, so it gets its own session and therefore its
+        // own autocommit transaction rather than joining whatever transaction
+        // some other client happens to have open.
+        Session session = engine_.new_session();
+        std::string engine_out = engine_.execute(sql, session);
 
         std::ostringstream json;
         json << "{\n"

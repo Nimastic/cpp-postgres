@@ -1,4 +1,5 @@
 #include "pg/buffer_pool.h"
+#include "pg/wal.h"
 #include <iostream>
 
 namespace pg {
@@ -17,23 +18,42 @@ BufferPoolManager::~BufferPoolManager() {
     flush_all();
 }
 
+// The WAL rule, enforced at the only place it can be: a page carrying changes
+// described by log records that are not yet durable must not reach disk, or a
+// crash leaves the heap ahead of the log with no way to reconcile the two.
+void BufferPoolManager::write_frame(BufferFrame& frame) {
+    if (frame.page_id == INVALID_PAGE_ID) {
+        return;
+    }
+    if (wal_ != nullptr) {
+        Page page(frame.data);
+        wal_->flush_up_to(page.lsn());
+    }
+    pager_.write_page(frame.page_id, frame.data);
+    frame.is_dirty = false;
+}
+
 Page* BufferPoolManager::fetch_page(page_id_t page_id) {
-    // 1. Check if page is already resident in RAM (Cache Hit)
+    // 1. Cache hit
     auto it = page_table_.find(page_id);
     if (it != page_table_.end()) {
         frame_id_t fid = it->second;
         frames_[fid].pin_count++;
-        frames_[fid].usage_count++;
-        return reinterpret_cast<Page*>(frames_[fid].data);
+        if (frames_[fid].usage_count < BUF_USAGECOUNT_MAX) {
+            frames_[fid].usage_count++;
+        }
+        hits_++;
+        return &frames_[fid].view;
     }
 
-    // 2. Cache Miss: Verify page exists on disk
+    // 2. Cache miss: the page must exist on disk
     if (page_id >= pager_.num_pages()) {
         throw std::out_of_range("BufferPoolManager: Requested page_id " + std::to_string(page_id) +
                                 " exceeds total on-disk pages " + std::to_string(pager_.num_pages()));
     }
+    misses_++;
 
-    // 3. Acquire a frame: from free list or via Clock-Sweep eviction
+    // 3. Acquire a frame: free list first, then clock sweep
     frame_id_t fid = INVALID_FRAME_ID;
     if (!free_list_.empty()) {
         fid = free_list_.back();
@@ -42,19 +62,32 @@ Page* BufferPoolManager::fetch_page(page_id_t page_id) {
         fid = victim_frame();
     }
 
-    // 4. Read page bytes from disk into the frame
     pager_.read_page(page_id, frames_[fid].data);
 
-    // 5. Initialize frame metadata
     frames_[fid].page_id = page_id;
     frames_[fid].pin_count = 1;
     frames_[fid].is_dirty = false;
     frames_[fid].usage_count = 1;
-
-    // 6. Record in page table
     page_table_[page_id] = fid;
 
-    return reinterpret_cast<Page*>(frames_[fid].data);
+    return &frames_[fid].view;
+}
+
+// Relation extension through the pool. Doing this through the Pager directly
+// would put a page on disk that the pool does not know about, which is how the
+// two copies drift apart.
+Page* BufferPoolManager::new_page(page_id_t* out_page_id) {
+    page_id_t pid = pager_.allocate_page();
+    if (out_page_id != nullptr) {
+        *out_page_id = pid;
+    }
+    Page* page = fetch_page(pid);
+    page->init();
+    auto it = page_table_.find(pid);
+    if (it != page_table_.end()) {
+        frames_[it->second].is_dirty = true;
+    }
+    return page;
 }
 
 bool BufferPoolManager::unpin_page(page_id_t page_id, bool is_dirty) {
@@ -67,11 +100,9 @@ bool BufferPoolManager::unpin_page(page_id_t page_id, bool is_dirty) {
     if (is_dirty) {
         frames_[fid].is_dirty = true;
     }
-
     if (frames_[fid].pin_count > 0) {
         frames_[fid].pin_count--;
     }
-
     return true;
 }
 
@@ -82,19 +113,16 @@ bool BufferPoolManager::flush_page(page_id_t page_id) {
     }
 
     frame_id_t fid = it->second;
-    if (frames_[fid].is_dirty && frames_[fid].page_id != INVALID_PAGE_ID) {
-        pager_.write_page(frames_[fid].page_id, frames_[fid].data);
-        frames_[fid].is_dirty = false;
+    if (frames_[fid].is_dirty) {
+        write_frame(frames_[fid]);
     }
-
     return true;
 }
 
 void BufferPoolManager::flush_all() {
     for (const auto& [pid, fid] : page_table_) {
-        if (frames_[fid].is_dirty && frames_[fid].page_id != INVALID_PAGE_ID) {
-            pager_.write_page(frames_[fid].page_id, frames_[fid].data);
-            frames_[fid].is_dirty = false;
+        if (frames_[fid].is_dirty) {
+            write_frame(frames_[fid]);
         }
     }
 }
@@ -115,8 +143,13 @@ bool BufferPoolManager::is_dirty(page_id_t page_id) const {
     return frames_[it->second].is_dirty;
 }
 
+// Clock sweep. Because usage_count is capped at BUF_USAGECOUNT_MAX, at most
+// BUF_USAGECOUNT_MAX full rotations are needed before some unpinned frame
+// reaches zero, so the loop is bounded without needing an arbitrary iteration
+// cap that could expire while frames are still evictable.
 frame_id_t BufferPoolManager::victim_frame() {
-    size_t scan_limit = pool_size_ * 2; // Up to 2 full rotations of the clock hand
+    const size_t max_rotations = static_cast<size_t>(BUF_USAGECOUNT_MAX) + 2;
+    const size_t scan_limit = pool_size_ * max_rotations;
 
     for (size_t i = 0; i < scan_limit; ++i) {
         frame_id_t fid = static_cast<frame_id_t>(clock_hand_);
@@ -124,30 +157,27 @@ frame_id_t BufferPoolManager::victim_frame() {
 
         auto& frame = frames_[fid];
 
-        // An active pinned page CANNOT be evicted
-        if (frame.pin_count == 0) {
-            if (frame.usage_count > 0) {
-                // Second chance: decrement usage count and continue scanning
-                frame.usage_count--;
-            } else {
-                // Found eviction victim!
-                // If dirty, flush to disk before overwriting frame
-                if (frame.is_dirty && frame.page_id != INVALID_PAGE_ID) {
-                    pager_.write_page(frame.page_id, frame.data);
-                    frame.is_dirty = false;
-                }
-
-                // Remove evicted page mapping from page table
-                if (frame.page_id != INVALID_PAGE_ID) {
-                    page_table_.erase(frame.page_id);
-                }
-
-                return fid;
-            }
+        if (frame.pin_count > 0) {
+            continue; // A pinned page is in use and can never be evicted
         }
+
+        if (frame.usage_count > 0) {
+            frame.usage_count--; // Second chance
+            continue;
+        }
+
+        if (frame.is_dirty) {
+            write_frame(frame);
+        }
+        if (frame.page_id != INVALID_PAGE_ID) {
+            page_table_.erase(frame.page_id);
+        }
+        evictions_++;
+        return fid;
     }
 
-    throw std::runtime_error("BufferPoolManager: All buffer frames are pinned! Cannot evict any page.");
+    throw std::runtime_error("BufferPoolManager: every frame is pinned; cannot evict. "
+                             "A caller is holding pins it never released.");
 }
 
 } // namespace pg

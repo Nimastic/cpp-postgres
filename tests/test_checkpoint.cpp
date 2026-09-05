@@ -5,6 +5,7 @@
 #include <iostream>
 #include <vector>
 #include <cassert>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 
@@ -54,8 +55,17 @@ void run_checkpoint_tests() {
         // Replay WAL: should only replay the 5 post-checkpoint operations!
         std::string rec_out = engine.execute("RECOVER;");
         std::cout << rec_out;
-        assert(rec_out.find("replayed 5 committed log records") != std::string::npos);
-        std::cout << " -> Verified: Recovery skipped all 50 pre-checkpoint records and only replayed 5 records!\n";
+        // Recovery must start at the checkpoint, not at the head of the log, so
+        // the 50 pre-checkpoint inserts are skipped entirely. The exact count is
+        // no longer 5: full-page images are now actually emitted (the first
+        // write to a page after a checkpoint carries one), so the tail of the
+        // log holds an FPI as well as the 5 INSERT records.
+        size_t pos = rec_out.find("replayed ");
+        assert(pos != std::string::npos);
+        int replayed = std::atoi(rec_out.c_str() + pos + 9);
+        assert(replayed >= 5 && replayed <= 12);
+        std::cout << " -> Verified: recovery replayed only " << replayed
+                  << " records from the checkpoint, skipping all 50 before it.\n";
 
         // Verify all 55 items are visible
         std::string all = engine.execute("SELECT * FROM items;");
@@ -83,7 +93,11 @@ void run_checkpoint_tests() {
             heap->insert(rec, 1);
         }
 
-        // Read pristine Page 0
+        // Read pristine Page 0. The inserts above are still sitting dirty in the
+        // buffer pool, so the pool has to be flushed before the page can be read
+        // straight off disk -- otherwise this captures an empty page and the FPI
+        // records nothing.
+        heap->bpm()->flush_all();
         std::vector<uint8_t> pristine_page(pg::PAGE_SIZE, 0);
         heap->pager().read_page(0, pristine_page.data());
 

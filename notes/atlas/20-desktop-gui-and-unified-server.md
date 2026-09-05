@@ -19,7 +19,7 @@ flowchart TD
     end
 
     subgraph CoreEngine["Shared Core Library (pg_core)"]
-        ENG["pg::Engine (C++20)\nShared Buffers · Slotted Pages · ARIES WAL · CLOG · TOAST"]
+        ENG["pg::Engine (C++20)\nShared Buffers · Slotted Pages · WAL + ARIES undo (this engine only, not PostgreSQL - see Item 16) · CLOG · TOAST"]
     end
 
     GUI --> ENG
@@ -50,7 +50,7 @@ flowchart TD
 │ │ 200 │ 5     │ 2  │0,2││ 🧠 Shared Buffers Tab: Live Clock-Sweep & Pin Tracking       │
 │ └─────┴───────┴────┴───┘│ 🌲 Disk B-Tree Tab: Key -> Candidate CTID Mapping           │
 │                         │ 🚦 CLOG Tab: 2-bit Transaction Status Bitmaps               │
-│ 📊 OUTPUT LOG CONSOLE   │ 📜 WAL Tab: ARIES Crash Recovery & Checkpoint Stream         │
+│ 📊 OUTPUT LOG CONSOLE   │ 📜 WAL Tab: Crash Recovery & Checkpoints (see Item 16)       │
 │                         │ 🍞 TOAST Tab: 2KB Chunk Auxiliary Table Inspector           │
 └──────────────────────────┴─────────────────────────────────────────────────────────────┘
 ```
@@ -90,3 +90,16 @@ sequenceDiagram
     Main->>PGW: stop (Closes socket)
     Main-->>Main: Database cleanly persisted to disk
 ```
+
+---
+
+## 4. PostgreSQL Fidelity Check
+
+Both binaries are original to this project; PostgreSQL ships `postgres`/`postmaster` plus `psql`, and its GUIs (pgAdmin, DBeaver) are separate projects speaking the wire protocol.
+
+Two labels in the diagrams above are worth reading precisely:
+
+- **"ARIES undo"** describes *this engine*. PostgreSQL's WAL is ARIES-influenced but redo-only — no undo pass, no CLRs (Item 16).
+- **"Page 0 Header (18B)"** in the GUI mock is this engine's header. PostgreSQL's is 24 bytes (Item 2).
+
+The `pg_server.exe` process model — one process, two listener threads, one shared `pg::Engine` behind a mutex — is also structurally unlike PostgreSQL, which forks a dedicated backend process per connection and coordinates through shared memory and lightweight locks. The single global mutex here means exactly one statement runs at a time, so none of the MVCC concurrency documented in Item 4 is actually exercised in parallel.

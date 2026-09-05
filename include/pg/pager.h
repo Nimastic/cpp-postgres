@@ -1,56 +1,52 @@
 #pragma once
 
 #include "pg/constants.h"
-#include <fstream>
+#include "pg/file.h"
 #include <string>
 #include <memory>
 #include <stdexcept>
 
 namespace pg {
 
+// Maps a relation file onto a linear array of fixed 8KB pages.
+//
+// This is the storage-manager layer (PostgreSQL's smgr/md.c). It knows nothing
+// about page contents; it moves whole blocks and nothing else.
 class Pager {
 public:
     explicit Pager(const std::string& filepath);
-    ~Pager();
+    ~Pager() = default;
 
-    // Disable copy construction and assignment
     Pager(const Pager&) = delete;
     Pager& operator=(const Pager&) = delete;
+    Pager(Pager&&) noexcept = default;
+    Pager& operator=(Pager&&) noexcept = default;
 
-    // Move operations
-    Pager(Pager&& other) noexcept;
-    Pager& operator=(Pager&& other) noexcept;
-
-    // Factory method
     static std::unique_ptr<Pager> open(const std::string& filepath);
 
-    // Allocate a new empty 8KB page at the end of the file and return its page_id
+    // Extend the relation by one zero-filled page and return its page_id.
     page_id_t allocate_page();
 
-    // Read 8192 bytes from page_id into out_buffer
     void read_page(page_id_t page_id, void* out_buffer);
-
-    // Write 8192 bytes from in_buffer to page_id
     void write_page(page_id_t page_id, const void* in_buffer);
 
-    // Total count of pages in file
-    size_t num_pages() const;
+    size_t num_pages() const { return num_pages_; }
 
-    // Flush file stream
-    void flush();
+    // Durability barrier for this relation. Checkpoints call this; ordinary page
+    // writes do not, because the WAL is what makes them recoverable.
+    void sync();
 
-    // Explicit close
+    // Retained for source compatibility. Positioned writes reach the OS
+    // immediately, so this is a no-op; call sync() when you need durability.
+    void flush() {}
+
     void close();
-
-    // Status check
-    bool is_open() const;
-
-    // Get filepath
+    bool is_open() const { return file_.is_open(); }
     const std::string& filepath() const { return filepath_; }
 
 private:
     std::string filepath_;
-    mutable std::fstream stream_;
+    File file_;
     size_t num_pages_{0};
 
     void update_num_pages();

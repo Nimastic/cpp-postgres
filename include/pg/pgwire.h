@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pg/engine.h"
+#include "pg/session.h"
 #include <string>
 #include <memory>
 #include <atomic>
@@ -42,7 +43,7 @@ private:
 
     // Protocol helper methods
     bool handle_startup_handshake(uintptr_t sock);
-    bool process_query_packet(uintptr_t sock, const std::string& query);
+    bool process_query_packet(uintptr_t sock, const std::string& query, Session& session);
     void send_ready_for_query(uintptr_t sock, char tx_status);
     void send_command_complete(uintptr_t sock, const std::string& tag);
     void send_error_response(uintptr_t sock, const std::string& msg);
