@@ -101,6 +101,9 @@ public:
     FreeSpaceMap& fsm() { return *fsm_; }
     const FreeSpaceMap& fsm() const { return *fsm_; }
 
+    // Pin a page for read-modify-write. Requires a buffer pool.
+    PinnedPage pin(page_id_t page_id);
+
     void flush();
 
 private:
@@ -109,9 +112,6 @@ private:
     std::unique_ptr<BufferPoolManager> owned_bpm_; // Used unless a pool is injected
     BufferPoolManager* bpm_{nullptr};              // Always non-null after construction
     WALManager* wal_{nullptr};
-
-    // Pin a page for read-modify-write. Requires a buffer pool.
-    PinnedPage pin(page_id_t page_id);
 
     // Full-page image before the first change to a page after a checkpoint, so
     // recovery can heal a torn write rather than replaying deltas onto rubble.

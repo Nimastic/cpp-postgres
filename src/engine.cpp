@@ -322,13 +322,23 @@ std::string Engine::update_item(int32_t item_id, int32_t new_price) {
 }
 
 std::string Engine::select_all() {
+    return select_all(0, 0);
+}
+
+std::string Engine::select_all(size_t limit, size_t offset) {
     bool autocommit = !sess_->current_tx.has_value();
     if (autocommit) {
         begin_transaction();
     }
 
     ensure_transaction();
-    auto visible = heap_->seq_scan(*sess_->snapshot, tm_);
+
+    std::unique_ptr<PlanNode> plan = std::make_unique<SeqScanNode>(*heap_, *sess_->snapshot, tm_);
+    if (limit > 0 || offset > 0) {
+        plan = std::make_unique<LimitNode>(std::move(plan), limit > 0 ? limit : std::numeric_limits<size_t>::max(), offset);
+    }
+
+    auto visible = ExecutionEngine::execute(*plan);
 
     std::string table = format_table(visible, "Sequential Table Scan");
 
@@ -346,14 +356,35 @@ std::string Engine::select_by_id(int32_t item_id) {
     }
 
     ensure_transaction();
-    auto visible_opt = index_lookup(*index_, *heap_, item_id, *sess_->snapshot, tm_);
-
-    std::vector<std::pair<CTID, HeapTuple>> results;
-    if (visible_opt.has_value()) {
-        results.push_back(*visible_opt);
-    }
+    IndexScanNode plan(*index_, *heap_, item_id, *sess_->snapshot, tm_);
+    auto results = ExecutionEngine::execute(plan);
 
     std::string table = format_table(results, "B-Tree Index Scan (Key: " + std::to_string(item_id) + ")");
+
+    if (autocommit) {
+        commit_transaction();
+    }
+
+    return table;
+}
+
+std::string Engine::select_filtered(std::function<bool(const TupleTableSlot&)> pred, const std::string& desc, size_t limit, size_t offset) {
+    bool autocommit = !sess_->current_tx.has_value();
+    if (autocommit) {
+        begin_transaction();
+    }
+
+    ensure_transaction();
+
+    std::unique_ptr<PlanNode> plan = std::make_unique<SeqScanNode>(*heap_, *sess_->snapshot, tm_);
+    plan = std::make_unique<FilterNode>(std::move(plan), std::move(pred), desc);
+    if (limit > 0 || offset > 0) {
+        plan = std::make_unique<LimitNode>(std::move(plan), limit > 0 ? limit : std::numeric_limits<size_t>::max(), offset);
+    }
+
+    auto visible = ExecutionEngine::execute(*plan);
+
+    std::string table = format_table(visible, "Filter Scan (" + desc + ")");
 
     if (autocommit) {
         commit_transaction();
@@ -564,18 +595,123 @@ std::string Engine::execute(const std::string& sql) {
         return update_item(item_id, price);
     }
 
+    // -------------------------------------------------------------------------
+    // EXPLAIN [ANALYZE] Prefix Detection
+    // -------------------------------------------------------------------------
+    bool is_explain = false;
+    bool is_analyze = false;
+    std::string target_query = clean;
+
+    std::regex explain_analyze_regex(R"(^EXPLAIN\s+ANALYZE\s+(.*))", std::regex::icase);
+    std::regex explain_regex(R"(^EXPLAIN\s+(.*))", std::regex::icase);
+    std::smatch explain_match;
+    if (std::regex_search(clean, explain_match, explain_analyze_regex)) {
+        is_explain = true;
+        is_analyze = true;
+        target_query = trim(explain_match[1].str());
+    } else if (std::regex_search(clean, explain_match, explain_regex)) {
+        is_explain = true;
+        is_analyze = false;
+        target_query = trim(explain_match[1].str());
+    }
+
+    // Helper to strip and extract LIMIT N [OFFSET M] from query string
+    auto parse_limit_offset = [](const std::string& q, size_t& limit, size_t& offset) -> std::string {
+        limit = 0;
+        offset = 0;
+        std::string base = q;
+        std::regex limit_offset_regex(R"(\s+LIMIT\s+(\d+)(?:\s+OFFSET\s+(\d+))?)", std::regex::icase);
+        std::smatch m;
+        if (std::regex_search(base, m, limit_offset_regex)) {
+            limit = std::stoul(m[1].str());
+            if (m[2].matched) {
+                offset = std::stoul(m[2].str());
+            }
+            base = base.substr(0, m.position());
+        } else {
+            std::regex offset_limit_regex(R"(\s+OFFSET\s+(\d+)(?:\s+LIMIT\s+(\d+))?)", std::regex::icase);
+            if (std::regex_search(base, m, offset_limit_regex)) {
+                offset = std::stoul(m[1].str());
+                if (m[2].matched) {
+                    limit = std::stoul(m[2].str());
+                }
+                base = base.substr(0, m.position());
+            }
+        }
+        return trim(base);
+    };
+
+    size_t query_limit = 0, query_offset = 0;
+    std::string base_sql = parse_limit_offset(target_query, query_limit, query_offset);
+
     // SELECT * FROM items WHERE item_id = id
     std::regex select_id_regex(R"(^SELECT\s+\*\s+FROM\s+items\s+WHERE\s+item_id\s*=\s*(-?\d+))", std::regex::icase);
     std::smatch select_id_match;
-    if (std::regex_search(clean, select_id_match, select_id_regex)) {
+    if (std::regex_search(base_sql, select_id_match, select_id_regex)) {
         int32_t item_id = std::stoi(select_id_match[1]);
-        return select_by_id(item_id);
+        if (!is_explain && query_limit == 0 && query_offset == 0) {
+            return select_by_id(item_id);
+        }
+        ensure_transaction();
+        std::unique_ptr<PlanNode> plan = std::make_unique<IndexScanNode>(*index_, *heap_, item_id, *sess_->snapshot, tm_);
+        if (query_limit > 0 || query_offset > 0) {
+            plan = std::make_unique<LimitNode>(std::move(plan), query_limit > 0 ? query_limit : std::numeric_limits<size_t>::max(), query_offset);
+        }
+        if (is_explain) {
+            return ExecutionEngine::explain(*plan, is_analyze);
+        }
+        bool autocommit = !sess_->current_tx.has_value();
+        if (autocommit) begin_transaction();
+        auto results = ExecutionEngine::execute(*plan);
+        std::string table = format_table(results, "B-Tree Index Scan (Key: " + std::to_string(item_id) + ")");
+        if (autocommit) commit_transaction();
+        return table;
     }
 
-    // SELECT * FROM items
+    // SELECT * FROM items WHERE price (op) val
+    std::regex select_price_regex(R"(^SELECT\s+\*\s+FROM\s+items\s+WHERE\s+price\s*([><!=]=?)\s*(-?\d+))", std::regex::icase);
+    std::smatch select_price_match;
+    if (std::regex_search(base_sql, select_price_match, select_price_regex)) {
+        std::string op = select_price_match[1].str();
+        int32_t target_price = std::stoi(select_price_match[2]);
+        ensure_transaction();
+        std::unique_ptr<PlanNode> plan = std::make_unique<SeqScanNode>(*heap_, *sess_->snapshot, tm_);
+        std::string desc = "price " + op + " " + std::to_string(target_price);
+        auto pred = [op, target_price](const TupleTableSlot& slot) -> bool {
+            int32_t p = slot.tuple.data.price;
+            if (op == ">") return p > target_price;
+            if (op == ">=") return p >= target_price;
+            if (op == "<") return p < target_price;
+            if (op == "<=") return p <= target_price;
+            if (op == "=" || op == "==") return p == target_price;
+            if (op == "!=") return p != target_price;
+            return false;
+        };
+        plan = std::make_unique<FilterNode>(std::move(plan), pred, desc);
+        if (query_limit > 0 || query_offset > 0) {
+            plan = std::make_unique<LimitNode>(std::move(plan), query_limit > 0 ? query_limit : std::numeric_limits<size_t>::max(), query_offset);
+        }
+        if (is_explain) {
+            return ExecutionEngine::explain(*plan, is_analyze);
+        }
+        return select_filtered(pred, desc, query_limit, query_offset);
+    }
+
+    // SELECT * FROM items [LIMIT N] [OFFSET M]
     std::regex select_all_regex(R"(^SELECT\s+\*\s+FROM\s+items)", std::regex::icase);
-    if (std::regex_search(clean, select_all_regex)) {
-        return select_all();
+    if (std::regex_search(base_sql, select_all_regex)) {
+        if (!is_explain && query_limit == 0 && query_offset == 0) {
+            return select_all();
+        }
+        if (!is_explain) {
+            return select_all(query_limit, query_offset);
+        }
+        ensure_transaction();
+        std::unique_ptr<PlanNode> plan = std::make_unique<SeqScanNode>(*heap_, *sess_->snapshot, tm_);
+        if (query_limit > 0 || query_offset > 0) {
+            plan = std::make_unique<LimitNode>(std::move(plan), query_limit > 0 ? query_limit : std::numeric_limits<size_t>::max(), query_offset);
+        }
+        return ExecutionEngine::explain(*plan, is_analyze);
     }
 
     if (upper == "HELP") {
@@ -586,8 +722,10 @@ std::string Engine::execute(const std::string& sql) {
         oss << "  ROLLBACK;                                      - Abort transaction\n";
         oss << "  INSERT INTO items VALUES (100, 10);            - Insert new item\n";
         oss << "  UPDATE items SET price = 20 WHERE item_id = 100;- HOT / MVCC update item\n";
-        oss << "  SELECT * FROM items;                           - Sequential table scan\n";
+        oss << "  SELECT * FROM items [LIMIT N] [OFFSET M];       - Volcano streaming sequential scan\n";
         oss << "  SELECT * FROM items WHERE item_id = 100;       - B-Tree index point query\n";
+        oss << "  SELECT * FROM items WHERE price > 50 [LIMIT N];- Filtered streaming scan\n";
+        oss << "  EXPLAIN [ANALYZE] SELECT ...;                  - Query execution plan tree\n";
         oss << "  VACUUM;                                        - Reclaim dead tuples & defragment\n";
         oss << "  DUMP PAGE 0;                                   - Slotted page physical layout dump\n";
         oss << "  STATUS;                                        - Buffer pool, WAL & Tx diagnostics\n";

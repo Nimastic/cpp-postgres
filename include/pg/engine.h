@@ -17,6 +17,7 @@
 #include "pg/clog.h"
 #include "pg/control.h"
 #include "pg/session.h"
+#include "pg/executor.h"
 #include <string>
 #include <memory>
 #include <optional>
@@ -58,7 +59,9 @@ public:
     std::string insert_item_with_doc(int32_t item_id, int32_t price, const std::string& doc);
     std::string update_item(int32_t item_id, int32_t new_price);
     std::string select_all();
+    std::string select_all(size_t limit, size_t offset);
     std::string select_by_id(int32_t item_id);
+    std::string select_filtered(std::function<bool(const TupleTableSlot&)> pred, const std::string& desc, size_t limit = 0, size_t offset = 0);
     std::string select_doc_by_id(int32_t item_id);
 
 

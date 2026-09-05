@@ -27,7 +27,7 @@ items. Regression coverage lives in `tests/test_recovery.cpp` and
 | 2.2 | No lock manager | **Fixed (basic)** | `LockManager` serialises row writers and reports conflicts |
 | 2.3 | Index is a `std::multimap` | **Fixed** | `DiskBTree` wired into `Engine`; `Index` interface; `remove_entry` in `Vacuum`; buffer pool caching; $O(1)$ startup |
 | 2.4 | Copy-in/copy-out buffer pool | **Fixed** | `Page` is a view over the frame; `PinnedPage` holds the pin across read-modify-write |
-| 2.5 | No executor | **Partly** | scans filter as they go instead of materialising the table; still no plan tree |
+| 2.5 | No executor | **Fixed** | Volcano iterator query execution engine (`PlanNode`, `TupleTableSlot`, streaming `SeqScanNode` with $\le 1$ pinned page, `IndexScanNode`, `FilterNode`, `LimitNode`, `EXPLAIN [ANALYZE]`) |
 | 2.6 | No free space map | **Fixed** | Free Space Map (`<db_prefix>_fsm.db`) companion fork; 8KB `FsmPage` binary max-heap tree layout; $O(\log M)$ allocation; VACUUM Phase 3 recycling |
 | 2.7 | TOAST writes no WAL | **Fixed** | `ToastChunkHeader` on-disk layout; `ToastManager::scan_existing_pages()` startup recovery; `WALRecordType::TOAST_INSERT`; ARIES REDO/UNDO replay |
 | 2.8 | CLOG I/O per transaction | **Fixed** | SLRU shared memory buffer pool (32 frames, 256KB, 1M tx resident); deferred writeback; flush on checkpoint and shutdown; zero synchronous disk I/O on commit |
@@ -169,9 +169,18 @@ Two consequences:
 
 ### 2.5 There is no executor; `seq_scan()` materialises the whole table
 
-`HeapFile::seq_scan()` (`src/heap.cpp:212`) builds a `std::vector` of every tuple on every page, and the snapshot-filtering overload (`:236`) then calls it and filters the result. Peak memory is the size of the table regardless of how many rows match.
+`HeapFile::seq_scan()` (`src/heap.cpp:212`) originally built a `std::vector` of every tuple on every page, and the snapshot-filtering overload (`:236`) then called it and filtered the result. Peak memory was the size of the entire table regardless of how many rows matched.
 
-Real engines stream: a plan node pulls one tuple at a time, so a `SELECT ... LIMIT 1` on a billion-row table touches one page. There is no plan tree, no cost model, no `ANALYZE` statistics, no join algorithms — reasonable for a storage-engine project, but it means "SQL engine" overstates the layer.
+Real engines stream: a plan node pulls one tuple at a time, so a `SELECT ... LIMIT 1` on a billion-row table touches one page.
+
+**Resolution (Fixed)**:
+1. **Volcano Demand-Driven Iterator Model (`include/pg/executor.h`, `src/executor.cpp`)**: Reconstructed PostgreSQL's Volcano execution engine (`ExecInitNode`, `ExecProcNode`, `ExecEndNode`) via abstract base class `PlanNode`.
+2. **Standardized Currency (`TupleTableSlot`)**: Encapsulates in-flight tuple data, physical CTID, and empty/populated state flag, matching PostgreSQL's `TupleTableSlot`.
+3. **Streaming `SeqScanNode` with $O(1)$ Buffer Pin Invariant**: Scans pages and slots on demand. Holds at most ONE 8KB page frame pinned in the shared buffer pool at any moment, automatically unpinning when advancing pages. Peak memory during sequential scan is reduced from $O(N)$ table size to $O(1)$ single slot.
+4. **`IndexScanNode`**: Streams candidate CTIDs from the `DiskBTree` index and resolves HOT chain visibility without table-wide scans. Deduplicates physical CTIDs across candidate hits.
+5. **Composable `FilterNode` & Pipelined `LimitNode`**: Evaluates row predicates on the fly and implements early termination (e.g. `LIMIT 5` halts on Page 0 and never touches or pins remaining table pages).
+6. **`EXPLAIN` and `EXPLAIN ANALYZE`**: Integrated plan tree inspection into `Engine::execute`, outputting visual operator trees with actual execution time and row counts.
+7. **Regression Coverage (`tests/test_executor.cpp`)**: Verifies the single-pin invariant, early page scan termination on `LIMIT 5`, filter pipelining, and HOT index resolution.
 
 ### 2.6 No free space map — VACUUM reclaims space that INSERT can never reuse
 

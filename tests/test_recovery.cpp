@@ -18,7 +18,7 @@ namespace {
 const std::string PREFIX = "test_recovery_db";
 
 void cleanup() {
-    for (const char* suffix : {"_heap.db", "_wal.log", "_clog.db", "_toast.db", "_control.db"}) {
+    for (const char* suffix : {"_heap.db", "_wal.log", "_clog.db", "_toast.db", "_control.db", "_index.db", "_fsm.db"}) {
         std::remove((PREFIX + suffix).c_str());
     }
 }

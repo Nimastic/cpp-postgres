@@ -1,6 +1,7 @@
 #include "pg/heap.h"
 #include "pg/buffer_pool.h"
 #include "pg/wal.h"
+#include "pg/executor.h"
 #include <iostream>
 
 namespace pg {
@@ -348,31 +349,8 @@ std::vector<std::pair<CTID, HeapTuple>> HeapFile::seq_scan() {
 }
 
 std::vector<std::pair<CTID, HeapTuple>> HeapFile::seq_scan(const Snapshot& snapshot, const TransactionManager& tm) {
-    std::vector<std::pair<CTID, HeapTuple>> visible_tuples;
-    size_t total_pages = pager_->num_pages();
-
-    // Filter while scanning rather than materialising the whole relation first.
-    for (page_id_t pid = 0; pid < total_pages; ++pid) {
-        PinnedPage page = pin(pid);
-        if (!page) continue;
-
-        size_t slots = page->num_slots();
-        for (slot_id_t s = 1; s <= slots; ++s) {
-            auto lp = page->get_line_pointer(s);
-            if (!lp.has_value() || lp->flags() != ItemFlags::NORMAL) continue;
-
-            size_t len = 0;
-            const uint8_t* ptr = page->get_tuple_ptr(s, &len);
-            if (ptr == nullptr || len < sizeof(HeapTuple)) continue;
-
-            HeapTuple t = HeapTuple::deserialize(ptr, len);
-            if (is_tuple_visible(t.header, snapshot, tm)) {
-                visible_tuples.emplace_back(CTID(pid, s), t);
-            }
-        }
-    }
-
-    return visible_tuples;
+    SeqScanNode scan(*this, snapshot, tm);
+    return ExecutionEngine::execute(scan);
 }
 
 

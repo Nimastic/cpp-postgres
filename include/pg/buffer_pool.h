@@ -92,6 +92,13 @@ public:
     bool is_resident(page_id_t page_id) const { return page_table_.find(page_id) != page_table_.end(); }
     uint32_t get_pin_count(page_id_t page_id) const;
     bool is_dirty(page_id_t page_id) const;
+    size_t pinned_frames() const {
+        size_t count = 0;
+        for (const auto& frame : frames_) {
+            if (frame.pin_count > 0) count++;
+        }
+        return count;
+    }
 
     // Direct access to underlying Pager
     Pager& pager() { return pager_; }

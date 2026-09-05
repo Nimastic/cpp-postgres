@@ -25,6 +25,7 @@ add_library(pg_core
     src/clog.cpp
     src/disk_btree.cpp
     src/fsm.cpp
+    src/executor.cpp
     src/http_server.cpp
     src/pgwire.cpp
 )
@@ -125,6 +126,10 @@ target_link_libraries(test_pgwire PRIVATE pg_core)
 # Item 21 test executable (Free Space Map - FSM)
 add_executable(test_fsm tests/test_fsm.cpp)
 target_link_libraries(test_fsm PRIVATE pg_core)
+
+# Item 23 test executable (Volcano Query Execution Engine)
+add_executable(test_executor tests/test_executor.cpp)
+target_link_libraries(test_executor PRIVATE pg_core)
 
 # -----------------------------------------------------------------------------
 # PostgreSQL Native Desktop GUI Explorer (Dear ImGui + DirectX 11)
